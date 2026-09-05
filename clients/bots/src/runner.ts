@@ -9,6 +9,14 @@ import { queueDelayMs, turnDecision, type TurnInput } from "./decide.ts";
 export interface BotClient {
   join(eventId: bigint, displayName: string, origin: "bot"): Promise<bigint>;
   submitBid(eventId: bigint, participantId: bigint, slotIndex: number, price: number): void;
+  /**
+   * Optional: resolves once the event has reached `state == "open"`. Real usage (Gate 2)
+   * joins during `created`, then the admin calls `start_countdown` and `open_event` — task
+   * file's "Bots poll for state == 'open'" — so a bot must wait before its delay+bid draw.
+   * The fixture client and existing mocks omit this: they don't model event lifecycle, so a
+   * bot bids immediately, matching Gate 1 behaviour exactly.
+   */
+  waitForOpen?(eventId: bigint): Promise<void>;
 }
 
 function hasCode(err: unknown, code: string): boolean {
@@ -55,6 +63,10 @@ async function runOneQueueBot(
   const participantId = await joinBotWithRetry(client, eventId);
   if (participantId === undefined) return;
 
+  if (client.waitForOpen) {
+    await client.waitForOpen(eventId);
+  }
+
   await sleep(queueDelayMs()); // independent per-bot draw on [0, DELTA_MS] — never fixed
 
   try {
@@ -69,13 +81,23 @@ async function runOneQueueBot(
  * Run `count` queue-mode bots as concurrent async tasks in this process. Process count is
  * independent of `count` — there is no per-bot process or worker here, only Promise.all over
  * async functions sharing the event loop.
+ *
+ * `client` may be a single shared `BotClient` (Gate 1 fixture usage, and every existing test)
+ * or a factory invoked once per bot (Gate 2 real usage: CONTRACT.md §9 — "40 bots get one
+ * connection each" — each bot gets its own `FairDropClient` connection, still all as async
+ * tasks in this one process).
  */
 export async function runQueueBots(
-  client: BotClient,
+  client: BotClient | (() => Promise<BotClient>),
   opts: { eventId: bigint; ticketPrice: number; count: number }
 ): Promise<void> {
+  const getClient: () => Promise<BotClient> =
+    typeof client === "function" ? client : () => Promise.resolve(client);
   await Promise.all(
-    Array.from({ length: opts.count }, () => runOneQueueBot(client, opts.eventId, opts.ticketPrice))
+    Array.from({ length: opts.count }, async () => {
+      const c = await getClient();
+      return runOneQueueBot(c, opts.eventId, opts.ticketPrice);
+    })
   );
 }
 
