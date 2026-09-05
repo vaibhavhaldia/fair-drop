@@ -234,12 +234,26 @@ the first slot.
 Once the event is `open`, in a second terminal:
 
 ```bash
-node --experimental-strip-types clients/bots/src/index.ts 10 "$EV" 15000
+node --experimental-strip-types clients/bots/src/index.ts 10 "$EV" "$DB"
 ```
+
+The arguments are `humanCount, eventId, dbName`. The third one is the **database**, not the
+ticket price — this line used to pass `15000`, which made the driver connect to a database
+called `15000` and hang for ten seconds before reporting the event missing. The driver never
+takes a price: it reads `ticketPrice` off the live event row, precisely so a guessed price
+cannot coincidentally satisfy CONTRACT §5's check and mask a mismatch elsewhere.
 
 The first argument is the **human** count; the bot count is derived from it at 4:1 (`BOT_RATIO`
 in `clients/bots/src/config.ts`), so `10` gives 40 bots. All 40 run as async tasks in one
-process — check the pid it prints.
+process — check the pid it prints. It also prints where the bots' time actually went:
+
+```
+open detected across bots (ms after the first): p50=14 p90=14 max=14
+bid submitted (ms after the first open detection): p50=290 p90=455 max=510
+```
+
+The second line should straddle 250ms and stop near 500ms. If it does not, the bots are being
+throttled by something other than `DELTA_MS`, and the Round 1 result is measuring the rig.
 
 Each bot waits a value drawn independently and uniformly on `[0, DELTA_MS = 500ms]`, so a
 successful queue run shows scattered rather than sequential winners:
@@ -253,6 +267,27 @@ a fixed sleep — which would synchronize the field into one arriving block and 
 arrival-order result meaningless.
 
 ---
+
+## Turn mode, with bots
+
+`index.ts` is queue-only. Round 2 has its own entry point, because five slots x 40 bots is not
+typeable:
+
+```bash
+node --experimental-strip-types clients/bots/src/turn.ts 10 "$EV" "$DB"
+```
+
+It runs in two phases and **pauses between them**: every bot connects and joins, it prints
+`READY joined=40`, and only then may you call `start_countdown`. That pause is not politeness —
+inventory is derived from the headcount at `start_countdown` and only that instant (CONTRACT
+§6), so a driver that started the countdown itself would race its own joins and size the event
+off a partial field, silently and repeatably.
+
+After `open_event` the bots need nothing further: each one watches `currentSlotIndex` on its own
+subscription and enters every slot it can afford, with the same `U(0, DELTA_MS)` reaction it
+uses in queue mode. That sameness is deliberate (TC-BOT-07) — turn mode's claim is that it
+neutralises the speed advantage *without the bot behaving differently*, and a bot that slowed
+down in Round 2 would be assuming the conclusion.
 
 ## Resetting
 
