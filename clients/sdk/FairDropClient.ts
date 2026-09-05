@@ -242,6 +242,29 @@ export class FairDropClient {
     };
   }
 
+  /**
+   * Invokes `cb` on every insert/update of one of `eventId`'s `Slot` rows. Turn mode bumps
+   * `Slot.entriesReceived` on every `submit_bid` inside the 60s window, whereas `Allocation`
+   * rows (and the `SlotResult` row) are only written at `close_slot` — so the display's live
+   * "Entries"/"Oversubscription" columns need this to move during the window instead of
+   * jumping at the end. Same additive rationale as `listSlots` above, recorded per
+   * CONTRACT.md §11 rather than silently added.
+   */
+  subscribeSlots(eventId: EventId, cb: (s: SlotRow) => void): Unsubscribe {
+    const onInsert = (_ctx: EventContext, row: SlotRow) => {
+      if (row.eventId === eventId) cb(row);
+    };
+    const onUpdate = (_ctx: EventContext, _old: SlotRow, row: SlotRow) => {
+      if (row.eventId === eventId) cb(row);
+    };
+    this.connection.db.slot.onInsert(onInsert);
+    this.connection.db.slot.onUpdate(onUpdate);
+    return () => {
+      this.connection.db.slot.removeOnInsert(onInsert);
+      this.connection.db.slot.removeOnUpdate(onUpdate);
+    };
+  }
+
   /** Invokes `cb` for every `SlotResult` row inserted for `eventId` — one per `close_slot`. */
   subscribeSlotResults(eventId: EventId, cb: (r: SlotResultRow) => void): Unsubscribe {
     const onInsert = (_ctx: EventContext, row: SlotResultRow) => {

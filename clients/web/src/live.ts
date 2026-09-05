@@ -30,6 +30,14 @@ export interface LiveSource {
   subscribeEvent(eventId: bigint, cb: (e: EventRow) => void): Unsubscribe;
   subscribeAllocations(eventId: bigint, cb: (a: AllocationRow) => void): Unsubscribe;
   subscribeSlotResults(eventId: bigint, cb: (r: unknown) => void): Unsubscribe;
+  /**
+   * Turn mode's live window. `Slot.entriesReceived` is bumped on every `submit_bid` while the
+   * 60s slot is open, but an `Allocation` row is not written until `close_slot` — so without
+   * this subscription the "Entries" and "Oversubscription" columns sit at 0 for the whole
+   * window and jump at close, hiding the one thing the projector should be showing as it
+   * happens. Queue mode has no `Slot` rows, so this simply never fires there.
+   */
+  subscribeSlots(eventId: bigint, cb: (s: SlotRow) => void): Unsubscribe;
 }
 
 /** The one DOM dependency this file has — anything with a settable `innerHTML`. */
@@ -49,11 +57,11 @@ function snapshot(source: LiveSource, eventId: bigint): DisplaySourceData | unde
 }
 
 /**
- * Subscribes `mount` to `eventId`'s live state. Every event/allocation/slot-result update
+ * Subscribes `mount` to `eventId`'s live state. Every event/allocation/slot/slot-result update
  * re-derives the full `DisplayModel` from a fresh snapshot and re-renders — the same
  * `deriveDisplayModel` -> `renderDisplay` pipeline `preview.ts` uses on a static fixture, run
  * again on every subscribed change instead of once. Returns an `Unsubscribe` that tears down
- * all three underlying subscriptions.
+ * all four underlying subscriptions.
  */
 export function mountLive(mount: MountNode, source: LiveSource, eventId: bigint): Unsubscribe {
   const render = () => {
@@ -67,10 +75,12 @@ export function mountLive(mount: MountNode, source: LiveSource, eventId: bigint)
   const unsubEvent = source.subscribeEvent(eventId, render);
   const unsubAllocations = source.subscribeAllocations(eventId, render);
   const unsubSlotResults = source.subscribeSlotResults(eventId, render);
+  const unsubSlots = source.subscribeSlots(eventId, render);
 
   return () => {
     unsubEvent();
     unsubAllocations();
     unsubSlotResults();
+    unsubSlots();
   };
 }
