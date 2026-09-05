@@ -16,9 +16,11 @@ export function createFixtureClient(): BotClient {
   return {
     async join(_eventId, displayName, _origin) {
       if (takenHandles.has(displayName)) {
-        const err = new Error("handle collision") as Error & { code: string };
-        err.code = "E_HANDLE_COLLISION";
-        throw err;
+        // Same carrier the live module uses: `throw new SenderError('E_HANDLE_COLLISION')`
+        // puts the code in `.message` and nowhere else. Never an invented `.code` property —
+        // the fixture would then be agreeing with the driver instead of standing in for the
+        // module (see `runner.ts`'s `hasCode`).
+        throw new Error("E_HANDLE_COLLISION");
       }
       takenHandles.add(displayName);
       const id = nextParticipantId;
