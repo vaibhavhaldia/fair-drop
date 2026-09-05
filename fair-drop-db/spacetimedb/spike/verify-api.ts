@@ -1,28 +1,35 @@
 // Spike: re-verifies every API claim in docs/CONTRACT.md §10 against a live instance.
 //
 // WHY THIS FILE EXISTS
-// The original spike source was reverted and dist/ is gitignored, so §10's nine
-// "build-proven" claims became unreproducible from the repo. This reconstructs them from
-// the shapes §10 recorded as working. It is NOT the original bytes — if it fails to build,
-// that is a finding about §10, not a bug in the spike. Report it before proceeding.
+// §10's claims had no artifact left in the repo (the original spike source was reverted and
+// dist/ is gitignored). This file is that artifact. It was run green on 2026-09-05 against
+// CLI 2.10.0 + spacetimedb@2.10.0 — the matched pair pinned in CONTRACT §1 — and the recorded
+// output is in §10. If it ever stops building or stops producing the results below, that is a
+// finding about §10, not a bug in the spike. Report it before proceeding.
 //
 // HOW TO RUN (never publishes over the real module — separate database name)
 //   export PATH="$HOME/.local/bin:$PATH"
-//   spacetime --version                     # must read 2.9.0; else: spacetime version use 2.9.0
+//   spacetime --version                     # must read 2.10.0; else: spacetime version use 2.10.0
 //   cp fair-drop-db/spacetimedb/src/index.ts /tmp/index.ts.bak
-//   cp fair-drop-db/spacetimedb/spike/verify-2.8-api.ts fair-drop-db/spacetimedb/src/index.ts
+//   cp fair-drop-db/spacetimedb/spike/verify-api.ts fair-drop-db/spacetimedb/src/index.ts
 //   spacetime publish -p fair-drop-db/spacetimedb fairdrop-spike --server local -y --delete-data=always
 //   # run from OUTSIDE fair-drop-db/, or spacetime.local.json overrides the database name
-//   spacetime call --server local fairdrop-spike join_proc '"Asha"'   # x3
+//   spacetime call --server local fairdrop-spike join_proc '"Asha"'   # x3, distinct names
 //   spacetime sql  --server local fairdrop-spike "SELECT * FROM participant"
-//   cp /tmp/index.ts.bak fair-drop-db/spacetimedb/src/index.ts
+//   spacetime call --server local fairdrop-spike force_handle_collision '"dupe"'   # x2
+//   cp /tmp/index.ts.bak fair-drop-db/spacetimedb/src/index.ts        # ALWAYS restore
 //
-// PASS CRITERIA (all four, matching §10)
+// PASS CRITERIA (all five, matching §10)
 //   1. It compiles at all           → t.option(...), scheduled: on the table, multi-column btree
 //   2. join_proc RETURNS [id, wallet] to the caller  → procedures return values
 //   3. Three rows land from ONE identity             → identity is non-unique
 //   4. The three walletBalance values are distinct integers in [20000, 150000]
 //      → ctx.random.integerInRange works and is not Math.random
+//   5. force_handle_collision succeeds once, then FAILS — and the failed row does not land,
+//      so the unique constraint rolls the transaction back rather than partially applying it
+//
+// Observed 2026-09-05: [1.0,69565.0] [2.0,147207.0] [3.0,101813.0]; 3 participant rows sharing
+// one identity; the second force_handle_collision errored and left the row count unchanged.
 
 import { schema, table, t } from 'spacetimedb/server';
 
@@ -94,6 +101,9 @@ export const joinProc = spacetimedb.procedure(
       const draw = ctx.random.integerInRange(20_000, 150_000);
       const suffix = ctx.random.integerInRange(0, 0xffff).toString(16);
       const row = tx.db.participant.insert({
+        // autoInc does NOT make the column optional in the insert type — pass a placeholder
+        // and read the assigned value off the returned row. See CONTRACT §2 correction 5.
+        id: 0n,
         identity: ctx.sender,
         handle: `${displayName}-${suffix}`,
         displayName,
@@ -110,6 +120,7 @@ export const forceHandleCollision = spacetimedb.reducer(
   { handle: t.string() },
   (ctx, { handle }) => {
     ctx.db.participant.insert({
+      id: 0n,
       identity: ctx.sender,
       handle,
       displayName: handle,
