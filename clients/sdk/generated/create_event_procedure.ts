@@ -16,5 +16,6 @@ export const params = {
   ticketFraction: __t.f64(),
   ticketPrice: __t.f64(),
   floors: __t.array(__t.f64()),
+  slotWindowSeconds: __t.u32(),
 };
 export const returnType = __t.u64()

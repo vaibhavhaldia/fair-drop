@@ -4,8 +4,10 @@
 #
 #   ./scripts/rehearse-round2.sh [label]
 #
-# Runs ~5.5 minutes: five 60s slots, plus the countdown. Nothing here can be hurried — the slot
-# window is SLOT_WINDOW_SECONDS in the module (Saksham's side), not a client-side timer.
+# Runs ~5.5 minutes at the stage settings: five 60s slots, plus the countdown. The slot window
+# is enforced by the module (`event.slotWindowSeconds`, chosen at create_event), not by a
+# client-side timer, so this script cannot hurry it — but it can now ASK for a shorter one:
+# `SLOT_WINDOW=10 ./scripts/rehearse-round2.sh` runs the same round in about a minute.
 #
 # CRITICAL (recipe §2.1): this creates a NEW event with a NEW population. Reusing Round 1's
 # participants means every winner carries hasWon and C5 blocks them — the round looks broken at
@@ -25,7 +27,15 @@ SERVER="${SERVER:-local}"
 H="${H:-10}"
 FRACTION="${FRACTION:-0.40}"
 FLOORS="${FLOORS:-[15000,22000,30000,40000,55000]}"
-ENTER_AT="${ENTER_AT:-55}"     # seconds into each 60s slot that the humans enter
+# Seconds each slot stays open. Now an argument to `create_event` rather than a module
+# constant, so a rehearsal can run short slots: SLOT_WINDOW=10 turns this script from ~5.5
+# minutes into ~1. The stage runs 60 — do not rehearse the final run at anything else, because
+# ENTER_AT below (and therefore the whole "humans react late" premise) scales with it.
+SLOT_WINDOW="${SLOT_WINDOW:-60}"
+# Seconds into each slot that the humans enter. Derived from the window rather than fixed at 55,
+# which would sit past the end of any window shorter than a minute and turn every human entry
+# into E_STALE_SLOT.
+ENTER_AT="${ENTER_AT:-$(( SLOT_WINDOW > 6 ? SLOT_WINDOW - 5 : 1 ))}"
 LABEL="${1:-round2}"
 
 pass=0; fail=0
@@ -35,17 +45,17 @@ q()    { spacetime sql --server "$SERVER" "$DB" "$1" 2>/dev/null; }
 nrows(){ q "$1" | grep -cE '^ +[0-9]+'; }
 napm() { perl -e "select undef,undef,undef,$1"; }
 
-echo "Round 2 — turn (Fair Drop)   db=$DB  H=$H  floors=$FLOORS"
+echo "Round 2 — turn (Fair Drop)   db=$DB  H=$H  floors=$FLOORS  slotWindow=${SLOT_WINDOW}s"
 
 # --- 2.1 Arrange --------------------------------------------------------------------------
 # TC-EVT-07 first, as its own throwaway event — a good beat on stage, and it must not pollute
 # the real one.
-rej=$(spacetime call --server "$SERVER" "$DB" create_event '"floors-probe"' '"turn"' "$FRACTION" '0' '[15000,22000,22000]' 2>&1)
+rej=$(spacetime call --server "$SERVER" "$DB" create_event '"floors-probe"' '"turn"' "$FRACTION" '0' '[15000,22000,22000]' "$SLOT_WINDOW" 2>&1)
 echo "$rej" | grep -q 'E_FLOORS_NOT_INCREASING' \
   && ok "TC-EVT-07 — non-increasing floors rejected with E_FLOORS_NOT_INCREASING" \
   || bad "TC-EVT-07 — expected E_FLOORS_NOT_INCREASING, got: $(echo "$rej" | head -2 | tr '\n' ' ')"
 
-EV=$(spacetime call --server "$SERVER" "$DB" create_event "\"$LABEL\"" '"turn"' "$FRACTION" '0' "$FLOORS" 2>/dev/null | tr -d '[:space:]')
+EV=$(spacetime call --server "$SERVER" "$DB" create_event "\"$LABEL\"" '"turn"' "$FRACTION" '0' "$FLOORS" "$SLOT_WINDOW" 2>/dev/null | tr -d '[:space:]')
 [ -n "$EV" ] || { bad "create_event returned nothing"; exit 1; }
 echo "  event=$EV"
 
@@ -87,7 +97,7 @@ quotas=$(q "SELECT slot_index, base_quota FROM slot WHERE event_id = $EV" | grep
 BASEQ_BEFORE="$quotas"
 
 spacetime call --server "$SERVER" "$DB" open_event "$EV" >/dev/null 2>&1
-echo "  opened — five 60s slots; humans enter at t+${ENTER_AT}s of each"
+echo "  opened — five ${SLOT_WINDOW}s slots; humans enter at t+${ENTER_AT}s of each"
 
 declare -a HUMAN_CODES
 for slot in 0 1 2 3 4; do

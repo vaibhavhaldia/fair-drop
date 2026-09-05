@@ -45,6 +45,7 @@ export const Event = __t.object("Event", {
   startTime: __t.timestamp(),
   endTime: __t.option(__t.timestamp()),
   ticketPrice: __t.option(__t.f64()),
+  slotWindowSeconds: __t.u32(),
   currentSlotIndex: __t.u32(),
   currentSlotEndsAt: __t.option(__t.timestamp()),
 });

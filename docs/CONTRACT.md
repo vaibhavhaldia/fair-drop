@@ -139,7 +139,7 @@ anything that must hand back a generated id is a procedure.
 
 | Name | Kind | Signature |
 |---|---|---|
-| `create_event` | **procedure** | `(name, mode, startTime, config) -> EventId` |
+| `create_event` | **procedure** | `(name, mode, startTime, config) -> EventId` — `config` carries `slotWindowSeconds` (turn only; `0` takes the 60s default) |
 | `join` | **procedure** | `(eventId, displayName, origin) -> ParticipantId` |
 | `start_countdown` | reducer | `(eventId)` — admin only |
 | `submit_bid` | reducer | `(eventId, participantId, slotIndex, price)` |
@@ -200,7 +200,7 @@ the whole transaction, **the last ticket purchase fails**. `close_slot` and `sub
 
 | Reducer | Codes |
 |---|---|
-| `create_event` | `E_FLOORS_EMPTY` · `E_FLOORS_NOT_INCREASING` · `E_TICKET_PRICE_INVALID` · `E_FRACTION_INVALID` |
+| `create_event` | `E_FLOORS_EMPTY` · `E_FLOORS_NOT_INCREASING` · `E_TICKET_PRICE_INVALID` · `E_FRACTION_INVALID` · `E_SLOT_WINDOW_INVALID` |
 | `start_countdown` | `E_NOT_ADMIN` · `E_WRONG_STATE` · `E_NO_PARTICIPANTS` |
 | `join` | `E_EVENT_SETTLED` · `E_HANDLE_COLLISION` *(retryable — pool regenerates the suffix)* |
 | `submit_bid` | `E_EVENT_NOT_OPEN` · `E_UNKNOWN_PARTICIPANT` · `E_WRONG_EVENT` · `E_ALREADY_WON` · `E_STALE_SLOT` · `E_PRICE_MISMATCH` · `E_INSUFFICIENT_BALANCE` · `E_SOLD_OUT` · `E_DUPLICATE_ENTRY` |
@@ -365,7 +365,9 @@ but "≤1 ticket per participant" must not be read on stage as "≤1 ticket per 
 the module makes the stronger claim, and nothing should be said that implies it.
 
 **The grinding case — C4's actual boundary.** The draw seed is a pure function of
-`(eventId, slotIndex, sorted(entry ids))`, all of it public in `bid`, and the slot window is 60s.
+`(eventId, slotIndex, sorted(entry ids))`, all of it public in `bid`, and the slot window is 60s
+on stage (`event.slotWindowSeconds`; a shorter one only shortens the window this argument is
+made over, it does not change the argument).
 An adversary holding several participant rows can therefore, at t-1s: enumerate the subsets of
 *their own* entries they could still submit, compute the resulting seed and ranking for each,
 and submit the subset that ranks one of their rows first. Determinism is what makes the draw

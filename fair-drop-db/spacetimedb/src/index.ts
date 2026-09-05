@@ -29,9 +29,27 @@ import { Timestamp } from 'spacetimedb';
 import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory.ts';
 import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw.ts';
 
-/** Countdown and per-slot window, both 60s (LLD §1a). */
+/** Countdown, still 60s (LLD §1a) — and unlike the slot window it binds nothing: the admin
+ *  calls `open_event` by hand, so this only feeds the display timer and this log line. */
 const COUNTDOWN_SECONDS = 60;
-const SLOT_WINDOW_SECONDS = 60;
+
+/**
+ * Per-slot window. 60s is LLD §1a's number and remains the DEFAULT, but it is no longer a
+ * constant: it is stored per event (`event.slotWindowSeconds`) and chosen at `create_event`.
+ *
+ * The reason is rehearsal cost, not stage flexibility. Five slots at 60s is five minutes per
+ * turn-mode run, which is the whole rehearsal budget — so a full turn round gets exercised far
+ * less often than the queue round it is supposed to be compared against. At 10s the same run
+ * takes 50 seconds and can be repeated between changes. On stage it stays 60.
+ *
+ * Bounded on both ends. Below `MIN` the window is shorter than a person's reaction time, so the
+ * draw would be measuring who had the page already open — the exact failure turn mode exists to
+ * remove. Above `MAX` a single slot outlives any plausible demo slot and, more practically, an
+ * abandoned event would keep a scheduled row live for hours.
+ */
+const DEFAULT_SLOT_WINDOW_SECONDS = 60;
+const MIN_SLOT_WINDOW_SECONDS = 5;
+const MAX_SLOT_WINDOW_SECONDS = 600;
 
 // ---------------------------------------------------------------------------------------
 // Tables — seven. `countdown_schedule` and `settle_schedule` are cut in the 4h re-plan;
@@ -66,6 +84,13 @@ const event = table(
 
     /** Queue mode only. */
     ticketPrice: t.option(t.f64()),
+
+    /**
+     * Turn mode only — seconds each slot stays open, chosen at `create_event` and never
+     * mutated. Stored per event rather than read from a module constant so a rehearsal can run
+     * 10s slots and the stage can run 60s ones from the same published module. 0 in queue mode.
+     */
+    slotWindowSeconds: t.u32(),
 
     /** Turn mode only. */
     currentSlotIndex: t.u32(),
@@ -289,9 +314,11 @@ export const createEvent = spacetimedb.procedure(
     ticketFraction: t.f64(),
     ticketPrice: t.f64(),
     floors: t.array(t.f64()),
+    /** Turn mode only; pass 0 in queue mode, or to take the 60s default. */
+    slotWindowSeconds: t.u32(),
   },
   t.u64(),
-  (ctx, { name, mode, ticketFraction, ticketPrice, floors }) => {
+  (ctx, { name, mode, ticketFraction, ticketPrice, floors, slotWindowSeconds }) => {
     if (mode !== 'queue' && mode !== 'turn') throw new SenderError('E_MODE_INVALID');
     if (!(ticketFraction > 0 && ticketFraction <= 1)) throw new SenderError('E_FRACTION_INVALID');
 
@@ -302,6 +329,16 @@ export const createEvent = spacetimedb.procedure(
       // ahead to it — which quietly dismantles the mechanism the demo is about.
       for (let i = 1; i < floors.length; i++) {
         if (floors[i] <= floors[i - 1]) throw new SenderError('E_FLOORS_NOT_INCREASING');
+      }
+      // 0 means "unspecified" and takes the default, so an existing caller that has no opinion
+      // about the window keeps the 60s it already had. Any other out-of-range value is a typo
+      // worth rejecting rather than silently clamping — a run at the wrong slot length looks
+      // like a working run and its timings are quietly meaningless.
+      if (
+        slotWindowSeconds !== 0 &&
+        (slotWindowSeconds < MIN_SLOT_WINDOW_SECONDS || slotWindowSeconds > MAX_SLOT_WINDOW_SECONDS)
+      ) {
+        throw new SenderError('E_SLOT_WINDOW_INVALID');
       }
     } else if (!(ticketPrice > 0)) {
       throw new SenderError('E_TICKET_PRICE_INVALID');
@@ -319,6 +356,8 @@ export const createEvent = spacetimedb.procedure(
         ticketsRemaining: 0,
         participantsAtOpen: 0,
         slotCount: mode === 'turn' ? floors.length : 0,
+        slotWindowSeconds:
+          mode === 'turn' ? slotWindowSeconds || DEFAULT_SLOT_WINDOW_SECONDS : 0,
         startTime: ctx.timestamp,
         endTime: undefined,
         ticketPrice: mode === 'queue' ? ticketPrice : undefined,
@@ -469,7 +508,7 @@ export const openEvent = spacetimedb.reducer({ eventId: t.u64() }, (ctx, { event
   if (ev.state !== 'countdown') throw new SenderError('E_WRONG_STATE');
 
   if (ev.mode === 'turn') {
-    const endsAt = secondsFrom(ctx.timestamp, SLOT_WINDOW_SECONDS);
+    const endsAt = secondsFrom(ctx.timestamp, ev.slotWindowSeconds);
     ctx.db.event.id.update({ ...ev, state: 'open', currentSlotEndsAt: endsAt });
     ctx.db.slotSchedule.insert({
       scheduledId: 0n,
@@ -787,7 +826,9 @@ export const closeSlot = spacetimedb.reducer(
       });
     }
 
-    const endsAt = secondsFrom(ctx.timestamp, SLOT_WINDOW_SECONDS);
+    // Every slot in an event uses the same window — read from the event row, so a slot cannot
+    // silently run to a different length than the one the round was rehearsed at.
+    const endsAt = secondsFrom(ctx.timestamp, ev.slotWindowSeconds);
     ctx.db.event.id.update({
       ...ev,
       ticketsRemaining,

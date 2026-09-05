@@ -88,7 +88,7 @@ fi
 # --- 5. the real smoke test: a procedure returns a value and the row lands ---------------
 # Procedures log a spurious "nonexistent reducer" ERROR on success (CONTRACT §10) — the
 # return value and the committed row are what count, not the log.
-eid="$(spacetime call --server "$SERVER" "$DB" create_event '"smoke"' '"queue"' '0.40' '15000' '[]' 2>/dev/null | tr -d '[:space:]')"
+eid="$(spacetime call --server "$SERVER" "$DB" create_event '"smoke"' '"queue"' '0.40' '15000' '[]' '0' 2>/dev/null | tr -d '[:space:]')"
 if [ "$eid" = "1" ]; then
   ok "create_event returned an id ($eid) — procedure return path works"
 else

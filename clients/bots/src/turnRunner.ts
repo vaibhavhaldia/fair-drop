@@ -53,7 +53,10 @@ export async function runOneTurnBot(
   opts: TurnBotOpts = {}
 ): Promise<void> {
   const pollMs = opts.pollMs ?? 25;
-  const deadline = Date.now() + (opts.timeoutMs ?? 10 * 60_000);
+  // Leak guard, not a real limit — same reasoning as `realClient.ts`'s OPEN_TIMEOUT_MS. It was
+  // 10 min, which silently assumed the module's old fixed 60s slot: `event.slotWindowSeconds` is
+  // now chosen per event and may be up to 600s, so five slots can legitimately outlive that.
+  const deadline = Date.now() + (opts.timeoutMs ?? 60 * 60_000);
   const acted = new Set<number>();
 
   while (Date.now() < deadline) {

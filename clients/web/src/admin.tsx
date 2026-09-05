@@ -46,6 +46,23 @@ function parseFloors(raw: string): number[] {
   return floors;
 }
 
+/**
+ * Seconds per slot. Bounds mirror the module's (`E_SLOT_WINDOW_INVALID`, 5..600) and are
+ * checked here too for the same reason `parseFloors` is: the module's rejection is correct but
+ * arrives after a round trip, and this is a field an operator edits under time pressure.
+ *
+ * The point of the field is rehearsal cost. Five slots at 60s is five minutes, so a turn round
+ * gets rehearsed far less often than the queue round it is meant to be compared with; at 10s
+ * the same round takes 50 seconds. Anything below ~10s stops being a fair test of turn mode
+ * against humans, though — the window has to outlast a person noticing it and tapping.
+ */
+function parseSlotWindow(raw: string): number {
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n)) throw new Error("Slot window must be a whole number of seconds.");
+  if (n < 5 || n > 600) throw new Error("Slot window must be between 5 and 600 seconds.");
+  return n;
+}
+
 function CreateEvent({
   client,
   onCreated,
@@ -58,6 +75,7 @@ function CreateEvent({
   const [fraction, setFraction] = useState("0.40");
   const [price, setPrice] = useState("15000");
   const [floors, setFloors] = useState("25000,30000,40000,55000,75000");
+  const [slotWindow, setSlotWindow] = useState("60");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -72,6 +90,7 @@ function CreateEvent({
         // Required by the procedure signature in both modes; ignored by the module for turn.
         ticketPrice: mode === "queue" ? Number(price) : 0,
         floors: mode === "turn" ? parseFloors(floors) : [],
+        slotWindowSeconds: mode === "turn" ? parseSlotWindow(slotWindow) : 0,
       });
       onCreated(id);
     } catch (err) {
@@ -110,6 +129,16 @@ function CreateEvent({
         <>
           <label htmlFor="floors">Floors, comma separated — must strictly increase</label>
           <input id="floors" value={floors} onChange={(e) => setFloors(e.target.value)} />
+
+          <label htmlFor="slotWindow">Slot window (seconds) — 60 on stage, 10 to rehearse</label>
+          <input
+            id="slotWindow" type="number" step="5" min="5" max="600"
+            value={slotWindow} onChange={(e) => setSlotWindow(e.target.value)}
+          />
+          <p className="muted" style={{ marginTop: 4 }}>
+            {parseFloorsCount(floors)} slots x {slotWindow}s ={" "}
+            {formatDuration(parseFloorsCount(floors) * Number(slotWindow || 0))} of open bidding.
+          </p>
         </>
       )}
 
@@ -117,6 +146,19 @@ function CreateEvent({
       {error !== "" && <p className="err">{error}</p>}
     </div>
   );
+}
+
+/** Slot count without throwing — the duration hint must survive a half-typed floors field. */
+function parseFloorsCount(raw: string): number {
+  return raw.split(",").map((f) => f.trim()).filter(Boolean).length;
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m === 0) return `${s}s`;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
 function EventPicker({

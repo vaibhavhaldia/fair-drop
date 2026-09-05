@@ -36,6 +36,12 @@ export interface CreateEventConfig {
   ticketPrice: number;
   /** Turn mode only; `[]` for queue. */
   floors: number[];
+  /**
+   * Turn mode only — seconds each slot stays open. Omit or pass 0 for the module's 60s default;
+   * 5..600 otherwise, and anything else is rejected with `E_SLOT_WINDOW_INVALID`. Short windows
+   * exist so a five-slot rehearsal costs 50 seconds instead of five minutes; the stage runs 60.
+   */
+  slotWindowSeconds?: number;
 }
 
 /**
@@ -110,6 +116,7 @@ export class FairDropClient {
       ticketFraction: config.ticketFraction,
       ticketPrice: config.ticketPrice,
       floors: config.floors,
+      slotWindowSeconds: config.slotWindowSeconds ?? 0,
     });
   }
 

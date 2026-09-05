@@ -43,7 +43,7 @@ value and the committed row are what count. Do not read that line as a failure.
 ## Queue mode — allocation on arrival
 
 ```bash
-spacetime call --server local $DB create_event '"manual-queue"' '"queue"' '0.40' '15000' '[]'
+spacetime call --server local $DB create_event '"manual-queue"' '"queue"' '0.40' '15000' '[]' '0'
 ```
 
 Arguments are `name, mode, ticketFraction, ticketPrice, floors`. There is no `totalTickets`
@@ -111,7 +111,7 @@ route was closed on 2026-09-06 (TC-EVT-12). Before that fix, `size_inventory` gu
 opened a dead event:
 
 ```bash
-EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]')
+EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]' '0')
 PID=$(spacetime call --server local $DB join "$EV" '"Solo"' '"human"')
 spacetime call --server local $DB start_countdown "$EV"   # totalTickets = 0, no error
 spacetime call --server local $DB open_event "$EV"
@@ -127,7 +127,7 @@ spacetime call --server local $DB submit_bid "$EV" "$PID" '0' '15000'   # -> E_S
 ## Turn mode — allocation deferred to the draw
 
 ```bash
-spacetime call --server local $DB create_event '"manual-turn"' '"turn"' '0.40' '0' '[25000,30000,40000]'
+spacetime call --server local $DB create_event '"manual-turn"' '"turn"' '0.40' '0' '[25000,30000,40000]' '10'
 ```
 
 Floors must **strictly increase** or you get `E_FLOORS_NOT_INCREASING`. This is a rejection rather

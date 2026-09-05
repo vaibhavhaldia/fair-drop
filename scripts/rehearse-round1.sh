@@ -44,7 +44,7 @@ nrows(){ q "$1" | grep -cE '^ +[0-9]+'; }
 echo "Round 1 — queue (FCFS)   db=$DB  H=$H  humanLag=${HUMAN_LAG_MS}ms"
 
 # --- 1.1 Arrange --------------------------------------------------------------------------
-EV=$(spacetime call --server "$SERVER" "$DB" create_event "\"$LABEL\"" '"queue"' "$FRACTION" "$TICKET_PRICE" '[]' 2>/dev/null | tr -d '[:space:]')
+EV=$(spacetime call --server "$SERVER" "$DB" create_event "\"$LABEL\"" '"queue"' "$FRACTION" "$TICKET_PRICE" '[]' '0' 2>/dev/null | tr -d '[:space:]')
 [ -n "$EV" ] || { bad "create_event returned nothing"; exit 1; }
 echo "  event=$EV"
 
