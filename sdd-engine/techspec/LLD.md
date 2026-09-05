@@ -69,7 +69,12 @@ Bid {
                                 // MUST NOT be read by the turn allocator (that's the point, C1)
   state: "pending" | "won" | "lost" | "rejected"
 }
-// UNIQUE (eventId, slotIndex, participant)  -- this is C2, enforced at the schema level
+// (eventId, slotIndex, participant) has no schema-level UNIQUE — SpacetimeDB only supports
+// single-column unique/primaryKey constraints (v2.0). C2 is enforced by check-then-insert
+// inside submit_bid (§2), which is safe only because reducers execute serially — no other
+// call can interleave between the existence check and the insert. A multi-column btree index
+// on (eventId, slotIndex, participant) still belongs here for lookup speed, it just isn't a
+// uniqueness guarantee on its own.
 
 Allocation {
   eventId: EventId             // indexed
@@ -141,53 +146,82 @@ itself.
 
 ### 1c. SpacetimeDB TS module shape
 
-SpacetimeDB TS modules declare tables and reducers via decorators from the server SDK
-(`spacetimedb/server` or `@clockworklabs/spacetimedb-sdk`, depending on the pinned version —
-**verify the exact import path and decorator names against whatever version lands in
-`module/package.json`**, the API has moved between releases).
+SpacetimeDB v2.0 TS modules use a **schema-builder API**, not decorators — tables are values
+built with `table()` + the `t.*` type builder, collected into one `schema({...})`, and reducers
+are exported members of that schema object (`spacetimedb.reducer(...)`). Import surface is
+`spacetimedb/server` for `schema`/`table`/`t`, and `spacetimedb` (note: no `/server`) for
+`ScheduleAt` — **verify both paths against whatever version lands in `module/package.json`**,
+this has moved across pre-2.0 releases.
 
 ```ts
-import { table, primaryKey, reducer, ReducerContext, Identity, Timestamp } from "spacetimedb/server";
+import { schema, table, t } from "spacetimedb/server";
+import { ScheduleAt } from "spacetimedb";
 
-@table({ public: true })
-export class Event {
-  @primaryKey id!: bigint;
-  name!: string;
-  mode!: string;              // "queue" | "turn"
-  state!: string;             // "created" | "countdown" | "open" | "settled"
-  totalTickets!: number;
-  ticketsRemaining!: number;
-  ticketPrice?: number;
-  currentSlotIndex!: number;
-  currentSlotEndsAt?: Timestamp;
-}
+const event = table(
+  { name: "event", public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    name: t.string(),
+    mode: t.string(),                 // "queue" | "turn"
+    state: t.string(),                // "created" | "countdown" | "open" | "settled"
+    totalTickets: t.u32(),
+    ticketsRemaining: t.u32(),
+    ticketPrice: t.f64().optional(),
+    currentSlotIndex: t.u32(),
+    currentSlotEndsAt: t.timestamp().optional(),
+  }
+);
 
 // Turn/slot boundaries AND the queue-mode countdown both use SpacetimeDB's *scheduled table*
-// pattern: a table with a `scheduled_at` column plus a same-named reducer the runtime invokes
-// automatically. This — not a hand-rolled setTimeout/cron — is what gives close_slot (and
-// open_event, once the countdown elapses) their "only the module may invoke this" guarantee
-// for free.
-@table({ scheduled: "close_slot" })
-export class SlotSchedule {
-  @primaryKey scheduledId!: bigint;
-  scheduledAt!: Timestamp;
-  eventId!: bigint;
-}
+// pattern: a table with a `scheduled_at`-typed column (via `t.scheduleAt()`) bound to a reducer
+// via `onSchedule`, which the runtime invokes automatically. This — not a hand-rolled
+// setTimeout/cron — is what gives close_slot (and open_event, once the countdown elapses) their
+// "only the scheduler may invoke this" guarantee for free. In v2.0, scheduled reducers are
+// private by default (ordinary clients cannot call them directly), so the `ctx.sender == module
+// identity` guard in §2 is defense-in-depth, not the only thing enforcing it.
+const slotSchedule = table(
+  { name: "slot_schedule" },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+    eventId: t.u64(),
+  }
+);
 
-@table({ scheduled: "open_event" })
-export class CountdownSchedule {
-  @primaryKey scheduledId!: bigint;
-  scheduledAt!: Timestamp;
-  eventId!: bigint;
-}
+const countdownSchedule = table(
+  { name: "countdown_schedule" },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+    eventId: t.u64(),
+  }
+);
 
-reducer("join", (ctx: ReducerContext, displayName: string, origin: "human" | "bot") => {
-  // creates Participant with walletBalance = 500_000
-});
+const spacetimedb = schema({ event, slotSchedule, countdownSchedule /*, participant, bid, ... */ });
+export default spacetimedb;
+
+export const closeSlot = spacetimedb.reducer(
+  { onSchedule: slotSchedule },
+  { arg: slotSchedule.rowType },
+  (ctx, { arg }) => {
+    // invoked automatically by the scheduler; arg.eventId identifies which event's slot closed
+  }
+);
+
+export const join = spacetimedb.reducer(
+  { displayName: t.string(), origin: t.string() },
+  (ctx, { displayName, origin }) => {
+    // creates Participant with walletBalance = 500_000
+  }
+);
 ```
 
-Client-visible effect is identical to the pseudocode in §2 regardless of exact decorator
-spelling: reducers are the only write path, and every write (including the wallet debit) is
+There is no schema-level composite `UNIQUE` (single-column `.unique()`/`.primaryKey()` only —
+see the `Bid` table comment in §1 and C2 in §2's `submit_bid`); multi-column lookups use a
+multi-column btree index instead, declared via the table's `indexes` option.
+
+Client-visible effect is identical to the pseudocode in §2 regardless of the exact builder
+syntax: reducers are the only write path, and every write (including the wallet debit) is
 transactional and serialized by the engine — this is what makes C3, and "ticket XOR refund,
 never partial," structural rather than something we implement with a saga.
 
@@ -261,7 +295,11 @@ if event.mode == "queue":
 if event.mode == "turn":
     guard: request.slotIndex == event.currentSlotIndex   // reject bids for a stale/future slot
     guard: price >= event.slots[event.currentSlotIndex].floor
-    guard: no existing Bid(eventId, event.currentSlotIndex, ctx.sender)   // C2 — reject if present
+    guard: no existing Bid(eventId, event.currentSlotIndex, ctx.sender)   // C2 — check-then-insert;
+                                                                          // safe only because
+                                                                          // reducers run serially
+                                                                          // (no schema-level
+                                                                          // composite UNIQUE exists)
     insert Bid { ..., seq: next_seq(), state: "pending" }
     // no allocation or debit happens here — return only "accepted"
 ```
