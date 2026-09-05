@@ -86,7 +86,14 @@ async function runOneQueueBot(
   if (participantId === undefined) return;
 
   if (client.waitForOpen) {
-    await client.waitForOpen(eventId);
+    try {
+      await client.waitForOpen(eventId);
+    } catch {
+      // A bot that gave up waiting drops out quietly. It must NOT propagate: every bot runs
+      // inside one `Promise.all`, so a single rejection would abort every other bot mid-flight
+      // — turning one slow start into a dead round. Dropping out costs one bot.
+      return;
+    }
   }
 
   await sleep(queueDelayMs()); // independent per-bot draw on [0, DELTA_MS] — never fixed

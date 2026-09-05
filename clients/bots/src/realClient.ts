@@ -14,6 +14,20 @@ import { FairDropClient } from "../../sdk/FairDropClient.ts";
 
 const DEFAULT_URI = "http://127.0.0.1:3000";
 
+/**
+ * How long a bot waits for `state == "open"` before giving up.
+ *
+ * Was 60s, which was correct while the driver was launched immediately before the operator
+ * opened the event. Auto mode inverts that: the driver now runs for the WHOLE join window, and
+ * the first bots start waiting the moment the first human joins. With 25-100 people arriving
+ * over several minutes, a 60s ceiling means the earliest bots time out and throw before anyone
+ * presses Open — verified live: `waitForOpen: event 13 did not open within 60000ms`.
+ *
+ * 30 minutes is not a real limit, it is a leak guard: it exists so an abandoned driver
+ * eventually exits instead of holding pooled sockets open forever.
+ */
+const OPEN_TIMEOUT_MS = Number(process.env.FAIRDROP_OPEN_TIMEOUT_MS ?? 30 * 60_000);
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -31,7 +45,7 @@ export function toBotClient(client: FairDropClient): BotClient {
     submitBid(eventId, participantId, slotIndex, price) {
       client.submitBid(eventId, participantId, slotIndex, price);
     },
-    async waitForOpen(eventId, pollMs = 25, timeoutMs = 60_000) {
+    async waitForOpen(eventId, pollMs = 25, timeoutMs = OPEN_TIMEOUT_MS) {
       const start = Date.now();
       for (;;) {
         const event = client.listEvents().find((e) => e.id === eventId);
