@@ -48,13 +48,44 @@ async function main() {
   // "40 bots get one connection each," so there are up to 40 sockets to close here).
   const connections: import("../../sdk/FairDropClient.ts").FairDropClient[] = [];
   const start = Date.now();
+  // Per-bot timing instrumentation. The bid delay a bot ACTUALLY achieves is not `DELTA_MS` —
+  // it is DELTA_MS plus however long this process took to notice `state == "open"` on that
+  // bot's own socket. That second term is invisible from the outside and, if it dominates, the
+  // Round 1 result stops measuring FCFS and starts measuring the demo rig. Recorded here so a
+  // rehearsal can see it (DEMO-RECIPE failure playbook: "check ... the bots aren't throttled").
+  const openedAt: number[] = [];
+  const bidAt: number[] = [];
   await runQueueBots(
     async () => {
       const { client, botClient } = await createRealBotClient(SERVER_URI, dbName);
       connections.push(client);
-      return botClient;
+      const waitForOpen = botClient.waitForOpen!.bind(botClient);
+      return {
+        ...botClient,
+        async waitForOpen(id: bigint) {
+          await waitForOpen(id);
+          openedAt.push(Date.now());
+        },
+        submitBid(...args: Parameters<typeof botClient.submitBid>) {
+          bidAt.push(Date.now());
+          return botClient.submitBid(...args);
+        },
+      };
     },
     { eventId, ticketPrice, count: botCount }
+  );
+  const pct = (xs: number[], base: number, q: number) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s.length === 0 ? NaN : Math.round(s[Math.floor((s.length - 1) * q)] - base);
+  };
+  const firstOpen = Math.min(...openedAt);
+  console.log(
+    `open detected across bots (ms after the first): ` +
+      `p50=${pct(openedAt, firstOpen, 0.5)} p90=${pct(openedAt, firstOpen, 0.9)} max=${pct(openedAt, firstOpen, 1)}`
+  );
+  console.log(
+    `bid submitted (ms after the first open detection): ` +
+      `p50=${pct(bidAt, firstOpen, 0.5)} p90=${pct(bidAt, firstOpen, 0.9)} max=${pct(bidAt, firstOpen, 1)}`
   );
   // Give the last submitBid calls a moment to reach the module before disconnecting —
   // submitBid is fire-and-forget from this client's point of view.
