@@ -1,4 +1,4 @@
-# fair-trade
+# fair-drop
 
 Ticket bots are playing the existing rules correctly because the sale rewards speed; change the clearing rule so arrival time carries no information.
 
