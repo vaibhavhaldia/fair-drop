@@ -24,8 +24,9 @@
 > `participant.id` stays the PK and `identity` stays non-unique, so re-introducing the pool
 > later needs no migration.
 >
-> **Two tests are being written**, both against the pure draw: TC-INV-01 (shuffled order →
-> identical allocations) and TC-CLR-09 (recompute the draw outside the module). Reducers
+> **Three tests are being written**, all against the pure draw: TC-INV-01 (shuffled order →
+> identical allocations), TC-CLR-09 (recompute the draw outside the module) and TC-CLR-11
+> (χ² uniformity — restored 2026-09-05 after its cut shipped a C1 violation). Reducers
 > **cannot** be unit-tested — `spacetimedb/server` imports `spacetime:sys@2.0`, a host-only
 > module scheme vitest cannot load. Everything else is verified by running the demo.
 
@@ -100,8 +101,8 @@ document was reconciled against it. The cases most changed:
 - *Scheduled reducers*: private by default; there is no `ctx.sender == module identity` guard
   to test (TC-LC-07).
 
-**4h build scope.** Only two cases are written as automated tests: **TC-INV-01** and
-**TC-CLR-09**, both against the pure draw module. Everything else is verified by the manual
+**4h build scope.** Only three cases are written as automated tests: **TC-INV-01**,
+**TC-CLR-09** and **TC-CLR-11**, all against the pure draw module. Everything else is verified by the manual
 stage rehearsal in `docs/DEMO-RECIPE.md`, which is written as arrange/act/check against these
 case ids — so a failing step names the case it violates. Reducers cannot be unit-tested
 (`spacetimedb/server` imports `spacetime:sys@2.0`, unloadable in vitest), so every `UT` marking

@@ -327,6 +327,18 @@ Stage 2.2 previously carried `TC-ROLL-01` as a blocking `✅` that could never p
 `entry.id` **is** read by the allocator — but only as a hash input, never as an ordering, and
 the seed uses the sorted *set*. This distinction is the hinge C1 turns on.
 
+**That hinge holds only if the hash avalanches.** `bid.id` is a sequential `autoInc` PK, so it
+encodes arrival order; any hash that preserves input locality turns "hash input" back into
+"ordering" and C1 fails **silently** — the demo still looks correct on stage. The draw hash must
+therefore have full 64-bit avalanche, and the requirement is a contract term, not an
+implementation detail. `digest64` = FNV-1a + SplitMix64 finalizer (`src/pure/hash.ts`), mirrored
+byte-for-byte in `integration/verify/recompute.mjs`; change one, change both.
+
+Raw FNV-1a alone was shipped on 2026-09-05 and measured biased: of 24 sequential ids, 6 could
+never place first and consecutive ids ranked adjacently (mean rank-gap 2.59 against 8.33 for a
+uniform draw). **TC-CLR-11 guards this and must not be cut again** — TC-INV-01 cannot detect it,
+because permuting the input array never changes the ids inside it.
+
 ---
 
 ## 8. Ownership

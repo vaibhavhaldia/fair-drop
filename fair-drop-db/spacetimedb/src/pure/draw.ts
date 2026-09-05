@@ -9,7 +9,7 @@
  * design has drifted — escalate rather than importing it.
  */
 
-import { fnv1a64, toHex64 } from './hash';
+import { digest64, toHex64 } from './hash';
 
 /** One committed entry in a slot. `id` is the `bid` row's PK. */
 export interface Entry {
@@ -38,7 +38,7 @@ export function deriveDrawSeed(
   entryIds: readonly bigint[]
 ): string {
   const sorted = [...entryIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  return toHex64(fnv1a64(`${eventId}:${slotIndex}:${sorted.join(',')}`));
+  return toHex64(digest64(`${eventId}:${slotIndex}:${sorted.join(',')}`));
 }
 
 /**
@@ -50,11 +50,15 @@ export function deriveDrawSeed(
  * possible failure shape, since it passes every rehearsal and breaks on stage.
  *
  * `entry.id` is read here only as a hash input and as a tie-break, never as an ordering.
- * That distinction is the hinge C1 turns on (CONTRACT §7).
+ * That distinction is the hinge C1 turns on (CONTRACT §7) — but it holds ONLY because
+ * `digest64` avalanches. `bid.id` is a sequential autoInc PK, so it encodes arrival order; a
+ * hash that preserves input locality turns "hash input" back into "ordering", and C1 then
+ * fails silently while the demo still looks correct on stage. Raw FNV-1a did exactly that
+ * (see `hash.ts` `mix64`). TC-CLR-11 is what makes this paragraph a fact rather than a hope.
  */
 export function rankEntries(drawSeed: string, entries: readonly Entry[]): Entry[] {
   return [...entries]
-    .map(entry => ({ entry, key: fnv1a64(`${drawSeed}:${entry.id}`) }))
+    .map(entry => ({ entry, key: digest64(`${drawSeed}:${entry.id}`) }))
     .sort((a, b) => {
       if (a.key !== b.key) return a.key < b.key ? -1 : 1;
       return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;

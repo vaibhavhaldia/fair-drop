@@ -33,15 +33,34 @@ Therefore:
 - Everything else is verified by **running it** — `spacetime call`, `spacetime sql`, and the
   demo itself. Do not spend time building test scaffolding for reducers.
 
-**Write exactly two tests.** Not two suites — two tests:
+**Write exactly three tests.** Not three suites — three tests:
 
 | Test | Why this one |
 |---|---|
 | TC-INV-01 | Shuffle insertion order ≥100 ways over ≥20 entries → identical `Allocation` rows. Pure, milliseconds, no server. **This is the thesis.** |
 | TC-CLR-09 | Recompute the draw outside the module from `drawSeed` + committed entries → exact match. ~10 lines once the draw is pure, and it is the whole differentiator over FCFS. |
+| TC-CLR-11 | χ² over win rates across 500 synthetic slots. **Restored 2026-09-05 after cutting it shipped a real bug** — see below. |
 
-If you find yourself writing a third, stop and ask whether it beats spending the time on a
+If you find yourself writing a fourth, stop and ask whether it beats spending the time on a
 second rehearsal.
+
+**Why TC-CLR-11 came back — do not cut it a second time.** This file originally said two tests,
+on the reasoning that TC-INV-01 carried C1 by itself. It does not. C1 has two failure modes and
+TC-INV-01 covers one:
+
+- *reads arrival order directly* (`seq`, insertion order) → TC-INV-01 catches it.
+- *reads something that correlates with arrival order* → TC-INV-01 is **structurally blind**,
+  because permuting the input array never changes the ids inside it.
+
+`bid.id` is a sequential `autoInc` PK, so it *is* arrival order. The first implementation ranked
+by raw FNV-1a, which barely avalanches on the tail of its input — so the draw ranked in very
+nearly id order. 6 of 24 entries could never win. All six tests passed throughout. The bug is
+invisible on stage, because human and bot ids interleave and the share still looks right.
+
+Related: Gate 3 below says "pick any stable hash … **do not escalate this one**." That was
+correct about seed *values* and wrong about the choice being free — what made it free was
+TC-CLR-11, which had already been cut. The hash now has a contract term (CONTRACT §7): it must
+avalanche.
 
 ---
 
@@ -160,8 +179,10 @@ scheduled for, and the double-close guard cannot detect that.
 committed state or the verifiability claim dies — and it dies *silently*, because an
 RNG-seeded draw still looks uniform and still passes every behavioural check.
 
-Pick any stable hash (SHA-256 over the sorted id list is fine) and note the choice. Do **not**
-escalate this one — no test asserts a specific seed value.
+Pick any stable hash **with full 64-bit avalanche** (CONTRACT §7 — this is now a contract term,
+not a free choice) and note it. No test asserts a specific seed *value*, so you need not escalate
+the choice — but a hash that preserves input locality silently violates C1, because `bid.id` is
+a sequential `autoInc` PK. `digest64` in `src/pure/hash.ts` is the one to use; TC-CLR-11 guards it.
 
 Write the two tests here, against the pure module.
 
@@ -202,9 +223,9 @@ repair between them.**
 | 1,250-participant load test | Run 40 bots. §1a's entire argument is that observables are turnout-**invariant**, so small N demonstrates the same property |
 | `countdown_schedule` + `settle_schedule` | Admin-triggered instead. Removes two scheduled wirings and the two ways an event can hang forever. `slot_schedule` stays — turn mode needs auto-advance |
 | The bounded connection pool | At 40 bots, one connection each is fine. **The schema is unchanged** (`participant.id` PK, non-unique `identity`), so the pool can return later with no migration |
-| ~200 of 219 test cases | Reducers are not unit-testable (above); the rest are verified by running the demo |
+| ~200 of 219 test cases | Reducers are not unit-testable (above); the rest are verified by running the demo. **TC-CLR-11 was wrongly in this bucket** and is restored — it is pure, cheap, and cutting it shipped a C1 violation |
 | Gates 5–8 (invariance suite, subscription audit, bot-runner polish, dashboard) | Their one irreplaceable item — C1 invariance — is pulled forward into Gate 3 as TC-INV-01 |
 
-**Kept deliberately despite the crunch:** TC-INV-01 and TC-CLR-09. They are cheap once the draw
+**Kept deliberately despite the crunch:** TC-INV-01, TC-CLR-09 and TC-CLR-11. They are cheap once the draw
 is pure, and they are the only evidence that the mechanism does what the demo claims. Cutting
 them would leave a demo that looks right and proves nothing.
