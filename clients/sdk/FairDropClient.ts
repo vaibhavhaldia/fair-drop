@@ -156,7 +156,11 @@ export class FairDropClient {
   }
 
   /**
-   * `submit_bid` — the single entrypoint for both modes. Queue mode passes `slotIndex = 0`.
+   * `submit_bid` — the single entrypoint for both modes. Queue mode passes `slotIndex = 0` and
+   * `price == event.ticketPrice` exactly. Turn mode (v4) passes a SEALED BID: any amount from
+   * `slot.floor` up to the participant's wallet. The slot resolves in decreasing order at close
+   * and a winner pays this exact number, so it is not interchangeable with the floor.
+   *
    * Errors (`E_INSUFFICIENT_BALANCE`, `E_SOLD_OUT`, ...) are normal traffic per CONTRACT §4 —
    * swallowed here with no log, matching every bot caller's own catch block, which already
    * discards them. This wrapper never retries.

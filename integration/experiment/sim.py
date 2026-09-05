@@ -7,6 +7,7 @@ before they are on stage, and its output is what produced HLD §5a.
 Covers TC-EXP-02..07:
   * turnout sweep              — derived inventory holds every observable flat (TC-EXP-04)
   * rule comparison arm        — random-among-qualifying vs retired pay-as-bid (TC-EXP-06)
+  * reseller arm               — bots as SCALPERS, not rich fans (TC-EXP-08, HLD §5b)
   * seeded determinism         — same seed, same output (TC-EXP-05)
 
 Usage:
@@ -156,6 +157,8 @@ def report(base_seed=0, trials=200):
         print(f"  bot delay δ={delta:<5} queue human share {q['human']/q['total']:6.1%}"
               f"   turn human share {t['human']/t['sold']:6.1%} (unchanged by δ)")
 
+    reseller_report()
+
 
 def check_determinism(seed=7):
     """TC-EXP-05 — same seed, identical outcome."""
@@ -165,6 +168,97 @@ def check_determinism(seed=7):
     return True
 
 
+# --- reseller arm (TC-EXP-08, HLD §5b) ----------------------------------------
+#
+# Everything above models a bot as a participant with a fan-shaped wallet that bids like a fan.
+# Under that assumption the clearing rule cannot change the human share, and HLD §5a's "both
+# rules give ~19.8%" is a tautology rather than a finding — which is why §5a could not answer
+# "what if bots are resellers?" at all.
+#
+# A reseller is not a rich fan. Their ceiling is a business calculation:
+#
+#     ceiling = resale price x (1 - margin)
+#
+# and the resale price is NOT free: a scalper can only sell to fans who did not get a ticket.
+# If they hold N tickets, they sell to the N best unserved fans, so the realised resale price is
+# the N-th highest valuation among fans still without one. That makes it a fixed point, solved
+# by iteration below rather than assumed.
+
+RESALE_MARGIN = 0.20
+BID_SHADE = (0.5, 1.0)      # fans shade in a sealed tranche; resellers barely do
+RESELLER_SHADE = 0.95
+
+
+def run_blind(humans, bots, rule, ceiling, seed, scarce=True):
+    """One turn event where bots are resellers. `rule` is "floor" (v3) or "blind" (v4).
+
+    `scarce=True` sizes supply from the FAN count rather than turnout. Turnout-scaled inventory
+    means more bots create more tickets, which dilutes exactly the scarcity that makes scalping
+    profitable — realistic for this demo, misleading as a model of a real drop.
+    """
+    rng = random.Random(seed)
+    pool = []
+    for i in range(humans + bots):
+        human = i < humans
+        pool.append({"v": rng.uniform(WALLET_MIN, WALLET_MAX) if human else ceiling,
+                     "s": rng.uniform(*BID_SHADE) if human else RESELLER_SHADE,
+                     "won": False, "paid": 0.0, "human": human})
+    _, qs = size_inventory(humans if scarce else len(pool))
+
+    carry = 0
+    for floor, base_quota in zip(FLOORS, qs):
+        quota = base_quota + carry
+        eligible = [p for p in pool if not p["won"] and p["v"] >= floor]
+        if rule == "floor":                       # v3: opt in at the posted price, draw at close
+            winners = [(floor, p) for p in rng.sample(eligible, min(quota, len(eligible)))]
+        else:                                     # v4: sealed bid, ranked descending, pay it
+            bids = [(floor + p["s"] * (p["v"] - floor), p) for p in eligible]
+            winners = sorted(bids, key=lambda x: -x[0])[:quota]
+        for price, p in winners:
+            p["won"], p["paid"] = True, price
+        carry = quota - len(winners)
+    return pool
+
+
+def resale_fixed_point(humans, bots, rule, seed, iters=40):
+    """Solve for the resale price a reseller can actually realise, then report the outcome."""
+    resale = float(WALLET_MAX)                    # start optimistic FOR the scalper
+    for _ in range(iters):
+        pool = run_blind(humans, bots, rule, resale * (1 - RESALE_MARGIN), seed)
+        held = sum(1 for p in pool if p["won"] and not p["human"])
+        unserved = sorted((p["v"] for p in pool if p["human"] and not p["won"]), reverse=True)
+        nxt = 0.0 if (held == 0 or not unserved) else unserved[min(held, len(unserved)) - 1]
+        if abs(nxt - resale) < 1.0:
+            resale = nxt
+            break
+        resale = 0.5 * resale + 0.5 * nxt         # damped: the raw map oscillates
+    pool = run_blind(humans, bots, rule, resale * (1 - RESALE_MARGIN), seed)
+    hw = [p for p in pool if p["won"] and p["human"]]
+    bw = [p for p in pool if p["won"] and not p["human"]]
+    fans = [p for p in pool if p["human"]]
+    richest = {id(p) for p in sorted(fans, key=lambda p: -p["v"])[:max(1, len(hw))]}
+    return {"resale": resale,
+            "share": len(hw) / max(1, len(hw) + len(bw)),
+            "bot_wins": len(bw),
+            "fan_paid": statistics.mean([p["paid"] for p in hw]) if hw else 0.0,
+            "overlap": sum(1 for p in hw if id(p) in richest) / max(1, len(hw)),
+            "scalper_profit": sum(resale - p["paid"] for p in bw)}
+
+
+def reseller_report(trials=60):
+    print("\n=== RESELLER ARM (TC-EXP-08) — bots priced by resale, not by wallet ===")
+    print("  supply = 40% of FANS · margin 20% · resale solved as a fixed point\n")
+    print(f"  {'turnout':>12} {'rule':>16} {'resale':>9} {'human share':>12}"
+          f" {'richest overlap':>16} {'fan pays':>10} {'scalper profit':>15}")
+    for humans, bots in ((250, 1000), (100, 400), (25, 100)):
+        for rule, label in (("floor", "v3 pay-the-floor"), ("blind", "v4 blind bid")):
+            rs = [resale_fixed_point(humans, bots, rule, s) for s in range(trials)]
+            m = lambda f: statistics.mean(r[f] for r in rs)
+            print(f"  {f'{humans}+{bots}':>12} {label:>16} {m('resale'):>9,.0f}"
+                  f" {m('share'):>11.1%} {m('overlap'):>15.1%} {m('fan_paid'):>10,.0f}"
+                  f" {m('scalper_profit'):>15,.0f}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
@@ -172,3 +266,5 @@ if __name__ == "__main__":
     args = ap.parse_args()
     check_determinism()
     report(args.seed, args.trials)
+
+

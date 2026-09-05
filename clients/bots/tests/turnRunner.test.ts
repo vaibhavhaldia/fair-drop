@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { runOneTurnBot, type TurnBotClient } from "../src/turnRunner.ts";
+import { botBidCeiling } from "../src/config.ts";
 
 // A scriptable stand-in for a subscribed connection: the test drives the event row forward
 // exactly as `close_slot` would, so the bot's slot sequencing is exercised without a live
@@ -49,7 +50,10 @@ describe("TC-BOT-06 — one entry per slot, however long the reaction delay runs
     await run;
 
     expect(submitBid).toHaveBeenCalledTimes(1);
-    expect(submitBid).toHaveBeenCalledWith(1n, 7n, 0, 15_000);
+    // v4: a reseller bot bids its ceiling (resale less margin), not the floor — 30,000 here,
+    // comfortably inside the 100,000 wallet. TC-BOT-06 is about submitting ONCE, so the amount
+    // is asserted alongside rather than as the point of the case.
+    expect(submitBid).toHaveBeenCalledWith(1n, 7n, 0, botBidCeiling());
   });
 });
 
@@ -81,7 +85,7 @@ describe("TC-BOT-04 — a winner goes quiet for the rest of the event", () => {
 // a bot priced out of slot 1 is priced out of every slot after it. This is the dropout curve
 // TC-BOT-08 watches on stage, seen from one bot's side.
 describe("TC-BOT-03 — a bot priced out of a floor abstains from then on", () => {
-  it("enters slot 0 at 15000 but nothing at 22000 or 30000 on a 20000 wallet", async () => {
+  it("bids its whole 20000 wallet in slot 0, then nothing at 22000 or 30000", async () => {
     const { client, state, submitBid } = fakeTurn({
       slotCount: 3,
       floors: [15_000, 22_000, 30_000],
@@ -98,6 +102,9 @@ describe("TC-BOT-03 — a bot priced out of a floor abstains from then on", () =
     await run;
 
     expect(submitBid).toHaveBeenCalledTimes(1);
-    expect(submitBid.mock.calls[0][3]).toBe(15_000);
+    // v4: the bid is min(resale ceiling, wallet), not the floor. A 20,000 wallet is the binding
+    // constraint here, so the bot commits all of it — and is then priced out of every later
+    // floor, which is the dropout this case exists to pin.
+    expect(submitBid.mock.calls[0][3]).toBe(20_000);
   });
 });

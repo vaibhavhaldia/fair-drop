@@ -80,7 +80,7 @@ export const SlotResult = __t.object("SlotResult", {
   id: __t.u64(),
   eventId: __t.u64(),
   slotIndex: __t.u32(),
-  clearingPrice: __t.f64(),
+  cutoffPrice: __t.f64(),
   entriesReceived: __t.u32(),
   allocated: __t.u32(),
   quotaRemainingAfterRollover: __t.u32(),

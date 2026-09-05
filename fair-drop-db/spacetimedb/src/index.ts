@@ -108,7 +108,8 @@ const slot = table(
     id: t.u64().primaryKey().autoInc(),
     eventId: t.u64(),
     slotIndex: t.u32(),
-    /** The posted price. Under pay-the-floor this is also the clearing price every winner pays. */
+    /** The MINIMUM bid for this slot. Not a price anyone necessarily pays — under v4's blind
+     *  bidding a winner pays their own bid, which is `>= floor`. */
     floor: t.f64(),
     /** Set once at `start_countdown`, NEVER mutated. `sum(baseQuota) == totalTickets` always. */
     baseQuota: t.u32(),
@@ -200,8 +201,15 @@ const slotResult = table(
     id: t.u64().primaryKey().autoInc(),
     eventId: t.u64(),
     slotIndex: t.u32(),
-    /** `= slot.floor`. Every winner in the slot paid exactly this. */
-    clearingPrice: t.f64(),
+    /**
+     * The LOWEST winning bid in this slot — what it took to get in. Under blind bidding each
+     * winner pays their own bid, so there is no single price everyone paid; this is a fact
+     * about the slot, not a charge. `0` when the slot drew no entries.
+     *
+     * Replaces v3's `clearingPrice`, which could be one column only because pay-the-floor made
+     * the floor and the price paid the same number.
+     */
+    cutoffPrice: t.f64(),
     entriesReceived: t.u32(),
     allocated: t.u32(),
     quotaRemainingAfterRollover: t.u32(),
@@ -324,7 +332,7 @@ export const createEvent = spacetimedb.procedure(
 
     if (mode === 'turn') {
       if (floors.length === 0) throw new SenderError('E_FLOORS_EMPTY');
-      // Reject, do not warn. Under pay-the-floor a non-increasing ladder means a later slot is
+      // Reject, do not warn. A non-increasing ladder means a later slot is
       // cheaper than an earlier one, and every remaining participant would rationally skip
       // ahead to it — which quietly dismantles the mechanism the demo is about.
       for (let i = 1; i < floors.length; i++) {
@@ -632,9 +640,14 @@ export const submitBid = spacetimedb.reducer(
 
     const slotRow = findSlot(ctx as any, eventId, slotIndex);
     if (slotRow == null) throw new SenderError('E_STALE_SLOT');
-    // An entry is an opt-in at the posted price. There is no bid amount to choose — for anyone.
-    if (price !== slotRow.floor) throw new SenderError('E_PRICE_MISMATCH');
-    if (p.walletBalance < slotRow.floor) throw new SenderError('E_INSUFFICIENT_BALANCE');
+    // Blind bidding: the floor is a MINIMUM, not the price. A bidder commits to any amount at
+    // or above it that their wallet covers, sees nobody else's number, and the slot resolves in
+    // decreasing order at close. Bidding the floor exactly is still allowed and still normal —
+    // it is the cheapest way in when a slot is undersubscribed.
+    if (!(price >= slotRow.floor)) throw new SenderError('E_PRICE_MISMATCH');
+    // The wallet is checked against the BID, not the floor: committing more than you hold is
+    // the one way a blind bid could win a ticket it cannot pay for.
+    if (p.walletBalance < price) throw new SenderError('E_INSUFFICIENT_BALANCE');
 
     // C2 — check-then-insert, safe ONLY because reducers run serially. There is no composite
     // unique constraint to lean on; SpacetimeDB supports single-column unique only.
@@ -647,7 +660,7 @@ export const submitBid = spacetimedb.reducer(
       eventId,
       slotIndex,
       participantId,
-      price: slotRow.floor,
+      price,
       qty: 1,
       seq: nextSeq(ctx as any, eventId),
       state: 'pending',
@@ -734,7 +747,7 @@ export const closeSlot = spacetimedb.reducer(
     const entries: Entry[] = [];
     const bidRows: any[] = [];
     for (const b of ctx.db.bid.by_event_slot.filter([timer.eventId, timer.slotIndex])) {
-      entries.push({ id: b.id, participantId: b.participantId });
+      entries.push({ id: b.id, participantId: b.participantId, price: b.price });
       bidRows.push(b);
     }
 
@@ -748,6 +761,10 @@ export const closeSlot = spacetimedb.reducer(
 
     const bidById = new Map<bigint, any>(bidRows.map(b => [b.id, b]));
     let filled = 0;
+    // 0, not null: `slot_result.cutoffPrice` is `f64` rather than `option<f64>` because a slot
+    // that took no entries has no cutoff to report and 0 says so unambiguously — `allocated`
+    // is 0 alongside it, and every reader already has to handle the empty slot.
+    let cutoffPrice = 0;
     let ticketsRemaining = ev.ticketsRemaining;
 
     for (const entry of ranked) {
@@ -765,26 +782,28 @@ export const closeSlot = spacetimedb.reducer(
       // a winner (C5), and under C5 a balance cannot move between submit and close within one
       // event. The policy is stated rather than exercised — pass the ticket to the next in draw
       // order, never produce a negative balance. TC-CLR-12/13 assert these never fire.
-      if (p.hasWon || p.walletBalance < slotRow.floor) {
+      if (p.hasWon || p.walletBalance < entry.price) {
         ctx.db.bid.id.update({ ...bidRow, state: 'rejected' });
         continue;
       }
 
-      // Allocation and debit in the same transaction, at the slot's uniform price. Every winner
-      // in the slot pays exactly this — there is no per-winner price under pay-the-floor.
+      // Allocation and debit in the same transaction, at THIS winner's own bid. Two winners in
+      // one slot routinely pay different amounts — that is what pay-your-bid means, and it is
+      // why `pricePaid` is per-allocation rather than derivable from the slot.
       ctx.db.allocation.insert({
         id: 0n,
         eventId: timer.eventId,
         slotIndex: timer.slotIndex,
         participantId: entry.participantId,
-        pricePaid: slotRow.floor,
+        pricePaid: entry.price,
       });
       ctx.db.participant.id.update({
         ...p,
-        walletBalance: p.walletBalance - slotRow.floor,
+        walletBalance: p.walletBalance - entry.price,
         hasWon: true,
       });
       ctx.db.bid.id.update({ ...bidRow, state: 'won' });
+      cutoffPrice = entry.price; // ranked descending, so the last one taken IS the cutoff
       filled++;
       ticketsRemaining--;
     }
@@ -798,7 +817,7 @@ export const closeSlot = spacetimedb.reducer(
       id: 0n,
       eventId: timer.eventId,
       slotIndex: timer.slotIndex,
-      clearingPrice: slotRow.floor,
+      cutoffPrice,
       entriesReceived: slotRow.entriesReceived,
       allocated: filled,
       quotaRemainingAfterRollover: unfilled,

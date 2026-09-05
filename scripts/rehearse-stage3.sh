@@ -25,13 +25,16 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 q()   { spacetime sql --server "$SERVER" "$DB" "$1" 2>/dev/null; }
 
 echo "Stage 3 — verifiability   db=$DB  event=$EV"
-q "SELECT slot_index, draw_seed, clearing_price, allocated FROM slot_result WHERE event_id = $EV" | grep -v WARNING
+q "SELECT slot_index, draw_seed, cutoff_price, allocated FROM slot_result WHERE event_id = $EV" | grep -v WARNING
 
 for slot in 0 1 2 3 4; do
   seed=$(q "SELECT slot_index, draw_seed FROM slot_result WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3}' | tr -d '"')
   [ -n "$seed" ] || { bad "slot $slot — no slot_result row"; continue; }
   quota=$(q "SELECT slot_index, effective_quota FROM slot WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3}')
-  ids=$(q "SELECT id FROM bid WHERE event_id = $EV AND slot_index = $slot" | grep -oE '^ +[0-9]+' | tr -d ' ' | paste -sd, -)
+  # id:price pairs — the verifier ranks by price first and uses the hash only within a tier, so
+  # bare ids would have it recompute a v3-shaped ranking and disagree with every real slot.
+  ids=$(q "SELECT id, price FROM bid WHERE event_id = $EV AND slot_index = $slot" \
+    | grep -E '^ +[0-9]+' | awk '{printf "%s:%s,", $1, $3}' | sed 's/,$//')
 
   out=$(node integration/verify/recompute.mjs --event "$EV" --slot "$slot" --ids "$ids" --quota "$quota" 2>&1)
   rseed=$(printf '%s' "$out" | grep -oE '[0-9a-f]{16}' | head -1)

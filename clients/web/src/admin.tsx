@@ -72,7 +72,7 @@ function CreateEvent({
 }) {
   const [mode, setMode] = useState<"queue" | "turn">("queue");
   const [name, setName] = useState(`demo-${new Date().toTimeString().slice(0, 5).replace(":", "")}`);
-  const [fraction, setFraction] = useState("0.40");
+  const [fraction, setFraction] = useState("0.20");
   const [price, setPrice] = useState("15000");
   const [floors, setFloors] = useState("25000,30000,40000,55000,75000");
   const [slotWindow, setSlotWindow] = useState("60");

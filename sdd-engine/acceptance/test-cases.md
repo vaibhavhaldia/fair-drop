@@ -71,7 +71,9 @@ E2E) or by a human running the demo by hand. Nothing ships until the P0 set is g
 
 **Decisions resolved in v3** (previously flagged open — do not silently re-open them):
 
-- *Clearing rule*: turn mode is **random among qualifying entries, pay-the-floor**. The
+- *Clearing rule* **(v4)**: turn mode is **blind bidding — a sealed bid at or above the floor,
+  resolved in decreasing price order, winners pay their own bid**, with the seeded hash draw
+  ordering entries inside a price tier. HLD §5b carries the evidence. What follows below the
   price-descending pay-as-bid rule from v2 is retired to the experiment runner's comparison
   arm (HLD §5a). All of §7 was rewritten for this.
 - *Rollover*: unsold quota **rolls forward** into the next slot (confirmed). §8 stands.
@@ -141,7 +143,7 @@ Traces: LLD §1, §1c.
 | TC-SCH-13 | UT    | P0  | `slot.baseQuota` and `slot.effectiveQuota` are **distinct columns**; there is no single `quota` column. Assert by schema inventory, so the rollover cannot be reintroduced as a mutation of the immutable one. |
 | TC-SCH-14 | UT    | P0  | **No hold state.** No table carries a column named `reserved`, `held`, `pending`, `locked`, `escrow`, or equivalent (LLD §2b). Serialized reducers make a hold redundant; its presence would signal the wallet debit had been split across calls. |
 | TC-SCH-15 | UT    | P1  | `event.slotCount` and `event.adminIdentity` exist. `slotCount` equals `floors.length` after a turn-mode `create_event` and `0` after a queue-mode one. |
-| TC-SCH-08 | UT    | P0  | `slot_result` carries `clearingPrice`, `entriesReceived`, `allocated`, `quotaRemainingAfterRollover`, and `drawSeed`. Assert **no** `cutoffPrice` column exists anywhere in the schema — it was removed in v3 because under pay-the-floor it duplicates `slot.floor`. |
+| TC-SCH-08 | UT    | P0  | **(v4, reversed)** `slot_result` carries `cutoffPrice`, `entriesReceived`, `allocated`, `quotaRemainingAfterRollover`, and `drawSeed`. `clearingPrice` is gone: under pay-your-bid there is no single price everyone paid, so the column that replaced it reports the LOWEST WINNING BID — what it took to get in, not what anyone was charged. `0` when the slot allocated nothing. |
 | TC-SCH-09 | UT    | P0  | `participant` has **no** `ceiling` column (deleted in v3 — the wallet is the ceiling). Assert by schema inventory so it cannot be reintroduced and drift from `walletBalance`.                                           |
 | TC-SCH-10 | IT    | P2  | Re-running the demo creates a **new** event with new rows and requires no migration — `slotIndex` behaves as data, not schema. There is no reset/replay path over an existing event; the only re-run mechanism is `create_event` (LLD §1b). |
 
@@ -268,7 +270,9 @@ Traces: HLD §3.2, LLD §2, §4.
 
 Traces: HLD §3.3, LLD §2 (`submit_bid`), C2, C5.
 
-> Under pay-the-floor an "entry" is an **opt-in at the posted price**, not a chosen amount.
+> **(v4)** An entry is a **sealed bid**: any amount from `slot.floor` up to the bidder's wallet,
+> invisible to everyone until the slot closes. Through v3 it was an opt-in at the posted price
+> with no amount to choose.
 > `price` is still the argument — it must equal `slot.floor` — which keeps `submit_bid` a
 > single entrypoint whose two branches differ only in the clearing rule (TC-BID-12).
 
@@ -309,8 +313,8 @@ Traces: HLD §5, LLD §2 (`close_slot`), §4.
 | TC-CLR-02 | UT    | P0  | **Pay-the-floor**: every winner's `Allocation.pricePaid` equals `slot.floor` exactly — identical for all winners in the slot. There is no per-winner price.                                                                                                                              |
 | TC-CLR-03 | UT    | P0  | Every winner's wallet is debited by exactly `slot.floor`, in the same transaction as the allocation write, and `hasWon` is set in that same transaction.                                                                                                                                 |
 | TC-CLR-04 | UT    | P0  | Every loser's wallet is unchanged and their entry state is `lost`.                                                                                                                                                                                                                       |
-| TC-CLR-05 | UT    | P0  | `slot_result` is written exactly once per slot with `clearingPrice = slot.floor`, `entriesReceived`, `allocated = filled`, `quotaRemainingAfterRollover = quota - filled`, and the `drawSeed` used.                                                                                      |
-| TC-CLR-06 | UT    | P0  | A slot with zero entries closes cleanly: no allocations, `allocated == 0`, `slot_result` still written (with its `clearingPrice` still equal to the floor), schedule advances.                                                                                                           |
+| TC-CLR-05 | UT    | P0  | `slot_result` is written exactly once per slot with `cutoffPrice = the lowest winning bid`, `entriesReceived`, `allocated = filled`, `quotaRemainingAfterRollover = quota - filled`, and the `drawSeed` used.                                                                                      |
+| TC-CLR-06 | UT    | P0  | A slot with zero entries closes cleanly: no allocations, `allocated == 0`, `slot_result` still written with `cutoffPrice == 0` (there is no winning bid to report), schedule advances.                                                                                                           |
 | TC-CLR-07 | UT    | P0  | `slot.filled` and `event.ticketsRemaining` are updated consistently: `sum(slot.filled) == totalTickets - ticketsRemaining` after every close.                                                                                                                                            |
 | TC-CLR-08 | UT    | P0  | **Determinism** — re-running `close_slot` over the same committed entry set reproduces the identical winner set. Run ≥100 times.                                                                                                                                                         |
 | TC-CLR-09 | UT    | P0  | **Verifiability** — recompute the draw *outside the module* from the published `drawSeed` and the committed entries, and assert the winner set matches the module's exactly. This is the property the mechanism claims over FCFS (HLD §5) and it must be independently checkable, not merely internally consistent. |
@@ -323,6 +327,11 @@ Traces: HLD §5, LLD §2 (`close_slot`), §4.
 | TC-CLR-15 | IT    | P0  | `close_slot` fires automatically from the scheduled table at `currentSlotEndsAt` ±1s — no manual trigger, no hand-rolled timer.                                                                                                                                                          |
 | TC-CLR-16 | IT    | P0  | After a non-final slot closes, `currentSlotIndex` advances by 1, `currentSlotEndsAt` is set to `now + 60s`, and the next `close_slot` is scheduled — one scheduled row, not two.                                                                                                         |
 | TC-CLR-17 | IT    | P0  | At demo scale: 1,000 entries against quota 100 → exactly 100 allocations, 900 `lost`, `close_slot` completes inside the slot boundary, and the winner set is reproducible from `drawSeed`.                                                                                               |
+| TC-CLR-13 | UT    | P0  | **(v4)** A slot resolves in decreasing bid order: with quota Q, the winners are the Q highest bids and every loser bid at or below the cutoff. Assert over a 12-entry ladder of distinct prices, under several input permutations — a 5-entry set lands on descending price by hash coincidence about once in 120 runs, which is a test that can pass before the feature exists. Enforced by `tests/draw.unit.test.ts`. |
+| TC-CLR-15 | UT    | P0  | **(v4)** Within a price tier the ordering is the seeded hash draw, so C1 survives where it still applies: 24 entries at one identical price produce a byte-identical winner set across 100 permutations, and a three-way tie AT the cutoff resolves the same way under every permutation. This is the case that would silently regress to first-come if the comparator were not stable. |
+| TC-CLR-16 | UT    | P0  | **(v4)** Pay-your-bid: each `allocation.pricePaid` equals that winner's own `bid.price`, and two winners in one slot may differ. The v3 check (`pricePaid == slot.floor`) now passes trivially on any floor-priced bid and must not be kept as evidence. `scripts/rehearse-round2.sh` asserts the live form: no `pricePaid` below the floor, `cutoffPrice == min(pricePaid)`, and no losing bid above the cutoff. |
+| TC-BID-16 | UT    | P0  | **(v4)** `submit_bid` guards on the BID, not the floor: `price < slot.floor` → `E_PRICE_MISMATCH`; `price > walletBalance` → `E_INSUFFICIENT_BALANCE`. The second is new — under pay-the-floor a bidder could not commit more than the floor, so wallet-vs-bid could not diverge. Verified live: a 14,999 bid on a 15,000 floor is rejected, and bids above wallet are rejected while the same bidder's affordable bids land. |
+| TC-EXP-08 | IT    | P1  | **(v4)** Reseller arm in `integration/experiment/sim.py`: bots priced by `resale x (1 - margin)` with the resale price solved as a fixed point over unserved fan valuations, supply sized from the fan count. Regenerates HLD §5b's table. Asserts the finding that motivated v4 — scalper profit collapses from ₹58L to ~₹1.2k — and the two costs it carries: fans pay ~₹1L rather than ₹31k, and richest-fan overlap rises from 8.3% to 93%. |
 
 
 
@@ -485,7 +494,7 @@ Traces: HLD §4.2, LLD §8.
 | TC-DASH-01 | IT    | P0  | Shows `totalTickets`, `ticketsRemaining`, `allocated` — and `allocated + ticketsRemaining == totalTickets` at every observed moment.                                     |
 | TC-DASH-02 | IT    | P0  | The **human vs bot split** is computed from `Allocation` joined to `Participant.origin` — not inferred from display name — and the two numbers sum to total allocations. |
 | TC-DASH-03 | E2E   | P0  | The split updates live as slots clear, with no manual refresh.                                                                                                           |
-| TC-DASH-04 | E2E   | P0  | Turn mode: per-slot rows show index, floor, effective quota (post-rollover), `entriesReceived`, and filled — matching the module's `slot` / `slot_result` rows exactly. There is **no cutoff-price column**: under pay-the-floor the floor is the clearing price, so the two collapsed into one value (LLD §8). |
+| TC-DASH-04 | E2E   | P0  | Turn mode: per-slot rows show index, floor, effective quota (post-rollover), `entriesReceived`, and filled — matching the module's `slot` / `slot_result` rows exactly. **(v4)** The cutoff-price column returns: under pay-your-bid the floor is a minimum and the cutoff is the lowest winning bid, so they are two different numbers again. **Not yet built** — `renderDisplay.ts` still shows Slot/Floor/Quota/Entries/Filled/Oversubscription only, and `slot_result` is subscribed but not projected. Tracked as the one v4 gap in the display. |
 | TC-DASH-05 | E2E   | P0  | The **oversubscription ratio** (`entriesReceived / quota`) is displayed per slot and visibly changes across the five slots as the eligible field shrinks. This replaces price discovery as the per-slot narrative (HLD §4.2). |
 | TC-DASH-06 | E2E   | P1  | `participantsAtOpen` and the derived `totalTickets` are shown, so the room can see inventory was sized from actual turnout rather than fixed in advance.                 |
 | TC-DASH-07 | E2E   | P1  | Queue mode: no slot table is rendered; the fixed ticket price is shown instead.                                                                                          |

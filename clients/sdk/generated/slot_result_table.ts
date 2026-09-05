@@ -14,7 +14,7 @@ export default __t.row({
   id: __t.u64().primaryKey(),
   eventId: __t.u64().name("event_id"),
   slotIndex: __t.u32().name("slot_index"),
-  clearingPrice: __t.f64().name("clearing_price"),
+  cutoffPrice: __t.f64().name("cutoff_price"),
   entriesReceived: __t.u32().name("entries_received"),
   allocated: __t.u32(),
   quotaRemainingAfterRollover: __t.u32().name("quota_remaining_after_rollover"),

@@ -225,6 +225,7 @@ function TurnFlow({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tick, setTick] = useState(0);
+  const [bid, setBid] = useState("");
 
   // The window is wall-clock: nothing is written to the event row while it ticks down, so
   // without this the countdown would sit still until the draw fires.
@@ -236,6 +237,14 @@ function TurnFlow({
   const ev = data.event!;
   const me = data.participants.find((p) => p.id === participantId);
   const slot = data.slots.find((s) => s.slotIndex === ev.currentSlotIndex);
+
+  // Reset the field to the new floor on every slot change, and never carry the previous slot's
+  // number forward: floors rise, so a stale value is either rejected or an accidental underbid
+  // — and the one thing this page must not do is submit an amount the person did not mean.
+  useEffect(() => {
+    setBid(slot == null ? "" : String(slot.floor));
+    setError("");
+  }, [ev.currentSlotIndex, slot?.floor]);
   const myAllocation = data.allocations.find((a) => a.participantId === participantId);
   const myBids = data.bids.filter((b) => b.participantId === participantId);
   const bidThisSlot = myBids.find((b) => b.slotIndex === ev.currentSlotIndex);
@@ -244,13 +253,22 @@ function TurnFlow({
 
   const enter = () => {
     if (slot == null) return;
+    const amount = Number(bid);
+    // Checked here as well as in the module: E_PRICE_MISMATCH and E_INSUFFICIENT_BALANCE are
+    // correct but arrive after a round trip, and this field is edited against a running clock.
+    if (!Number.isFinite(amount) || amount < slot.floor) {
+      setError(`Bid at least the floor — ${slot.floor}.`);
+      return;
+    }
+    if (me != null && amount > me.walletBalance) {
+      setError(`That is more than your wallet holds (${me.walletBalance}).`);
+      return;
+    }
     setBusy(true);
     setError("");
-    // The price MUST equal the slot floor exactly — there is no amount to choose, for anyone.
-    // That is the mechanism, not a limitation: under a draw at a posted price there is no bid
-    // to optimise, so speed and spend both stop mattering.
+    // Blind: nobody sees this number until the slot closes, and it is what you pay if you win.
     client
-      .submitBidChecked(eventId, participantId, ev.currentSlotIndex, slot.floor)
+      .submitBidChecked(eventId, participantId, ev.currentSlotIndex, amount)
       .catch((err) => setError(errorText(err)))
       .finally(() => setBusy(false));
   };
@@ -273,8 +291,7 @@ function TurnFlow({
             Slot {myAllocation.slotIndex} · paid {myAllocation.pricePaid}
           </p>
           <p className="muted" style={{ marginBottom: 0 }}>
-            Everyone who won this slot paid the same floor. Not what they bid — there was
-            nothing to bid.
+            You pay what you bid — not what the last winner bid, and not what anyone else paid.
           </p>
         </div>
         {ladder}
@@ -288,8 +305,8 @@ function TurnFlow({
         <div className="card">
           <h2 style={{ marginTop: 0 }}>Event over</h2>
           <p className="muted" style={{ margin: 0 }}>
-            No ticket this time — you were in {myBids.length} draw
-            {myBids.length === 1 ? "" : "s"}. Every entry had the same chance as every other.
+            No ticket this time — you bid in {myBids.length} slot
+            {myBids.length === 1 ? "" : "s"} and were outbid in each.
           </p>
         </div>
         {ladder}
@@ -328,8 +345,8 @@ function TurnFlow({
 
         {bidThisSlot != null ? (
           <p className="ok" style={{ margin: 0 }}>
-            You are in this draw. Entering earlier would not have helped — the draw ignores
-            arrival order entirely.
+            Your bid of {bidThisSlot.price} is in. Nobody can see it, and bidding earlier would
+            not have helped — the slot resolves all at once when the clock runs out.
           </p>
         ) : !affordable ? (
           <>
@@ -342,17 +359,31 @@ function TurnFlow({
             </p>
           </>
         ) : (
-          <button onClick={enter} disabled={busy}>
-            {busy ? "Entering…" : `Enter draw — ${slot?.floor}`}
-          </button>
+          <>
+            <label htmlFor="bid">Your bid — at least {slot?.floor}, at most {me?.walletBalance}</label>
+            <input
+              id="bid" type="number" inputMode="numeric"
+              step={1000} min={slot?.floor} max={me?.walletBalance}
+              value={bid} onChange={(e) => setBid(e.target.value)}
+            />
+            <p className="muted" style={{ marginTop: 4 }}>
+              Sealed. Highest bids take the {slot?.effectiveQuota} tickets when the clock hits
+              zero, and winners pay their own bid. Ties are broken by the published draw, never
+              by who bid first.
+            </p>
+            <button onClick={enter} disabled={busy}>
+              {busy ? "Bidding…" : `Bid ${bid || slot?.floor}`}
+            </button>
+          </>
         )}
 
         {error !== "" && <p className="err">{error}</p>}
 
         {lost.length > 0 && bidThisSlot == null && (
           <p className="muted" style={{ marginBottom: 0 }}>
-            Not drawn in slot{lost.length === 1 ? "" : "s"}{" "}
-            {lost.map((b) => b.slotIndex).join(", ")}. Nothing carries over — each draw is fresh.
+            Outbid in slot{lost.length === 1 ? "" : "s"}{" "}
+            {lost.map((b) => b.slotIndex).join(", ")}. Nothing carries over — your wallet is
+            untouched, and this slot is a fresh sealed round.
           </p>
         )}
       </div>

@@ -25,13 +25,20 @@ cd "$(dirname "$0")/.."
 DB="${DB:-fairdrop-scratch}"
 SERVER="${SERVER:-local}"
 H="${H:-10}"
-FRACTION="${FRACTION:-0.40}"
+# 0.20 since v4. At 0.40 the ladder cannot clear: inventory is 40% of TURNOUT (bots included)
+# but only H fans exist and C5 caps each at one ticket, so above the resellers' ceiling the top
+# slots have no possible bidder. Measured: floors 40k/55k drew 0 entries and 8 of 20 tickets
+# went unsold. See HLD §5b.
+FRACTION="${FRACTION:-0.20}"
 FLOORS="${FLOORS:-[15000,22000,30000,40000,55000]}"
 # Seconds each slot stays open. Now an argument to `create_event` rather than a module
 # constant, so a rehearsal can run short slots: SLOT_WINDOW=10 turns this script from ~5.5
 # minutes into ~1. The stage runs 60 — do not rehearse the final run at anything else, because
 # ENTER_AT below (and therefore the whole "humans react late" premise) scales with it.
 SLOT_WINDOW="${SLOT_WINDOW:-60}"
+# Human n bids floor + n x this. Fans differ in what the event is worth to them; identical bids
+# would make every slot a pure tie-break.
+HUMAN_BID_STEP="${HUMAN_BID_STEP:-2000}"
 # Seconds into each slot that the humans enter. Derived from the window rather than fixed at 55,
 # which would sit past the end of any window shorter than a minute and turn every human entry
 # into E_STALE_SLOT.
@@ -87,7 +94,7 @@ n=$(nrows "SELECT id FROM participant WHERE event_id = $EV")
 
 # --- 2.2 Act ------------------------------------------------------------------------------
 spacetime call --server "$SERVER" "$DB" start_countdown "$EV" >/dev/null 2>&1
-expect_t=$(( (H * 5 * 40 + 50) / 100 ))
+expect_t=$(( (H * 5 * 20 + 50) / 100 ))   # round(0.20 * 5H), exact at demo scale
 tt=$(q "SELECT total_tickets FROM event WHERE id = $EV" | grep -oE '^ +[0-9]+' | tr -d ' ')
 sumq=$(q "SELECT base_quota FROM slot WHERE event_id = $EV" | grep -E '^ +[0-9]+' | awk '{s+=$1} END{print s+0}')
 quotas=$(q "SELECT slot_index, base_quota FROM slot WHERE event_id = $EV" | grep -E '^ +[0-9]+' | awk '{printf "%s,", $3}' | sed 's/,$//')
@@ -110,13 +117,20 @@ for slot in 0 1 2 3 4; do
   done
   napm "$ENTER_AT"
   floor=$(q "SELECT slot_index, \"floor\" FROM slot WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3}')
+  # Blind bids, not opt-ins. Each human commits a different amount at or above the floor —
+  # a fan bids what the night is worth to them, and the spread is what lets the slot resolve in
+  # decreasing order at all. A rehearsal where every human bid the floor exactly would leave the
+  # ranking entirely to the tie-break and prove nothing about the mechanism.
   codes=""
+  h=0
   for p in $HUMANS; do
-    c=$(spacetime call --server "$SERVER" "$DB" submit_bid "$EV" "$p" "$slot" "$floor" 2>&1 | grep -oE 'E_[A-Z_]+' | head -1)
+    h=$((h+1))
+    bid=$(( floor + (h * HUMAN_BID_STEP) ))
+    c=$(spacetime call --server "$SERVER" "$DB" submit_bid "$EV" "$p" "$slot" "$bid" 2>&1 | grep -oE 'E_[A-Z_]+' | head -1)
     codes="$codes ${c:-ok}"
   done
   HUMAN_CODES[$slot]="$codes"
-  echo "  slot $slot (floor $floor) human entries:$codes"
+  echo "  slot $slot (floor $floor) human bids ${floor}+${HUMAN_BID_STEP}n:$codes"
   # let the scheduled close_slot land
   for _ in $(seq 1 60); do
     nrows "SELECT id FROM slot_result WHERE event_id = $EV AND slot_index = $slot" | grep -q '^1$' && break
@@ -134,15 +148,31 @@ badprice=0; badalloc=0
 for slot in 0 1 2 3 4; do
   fl=$(q "SELECT slot_index, \"floor\", effective_quota FROM slot WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3, $5}')
   set -- $fl; sfloor=$1; equota=$2
-  rr=$(q "SELECT slot_index, clearing_price, allocated FROM slot_result WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3, $5}')
-  set -- $rr; cprice=$1; alloc=$2
-  [ "$cprice" = "$sfloor" ] || badprice=$((badprice+1))
+  rr=$(q "SELECT slot_index, cutoff_price, allocated FROM slot_result WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3, $5}')
+  set -- $rr; cutoff=$1; alloc=$2
   [ "${alloc:-0}" -le "${equota:-0}" ] || badalloc=$((badalloc+1))
-  # TC-CLR-03 — every winner in the slot paid exactly that floor
-  wrong=$(q "SELECT slot_index, price_paid FROM allocation WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk -v f="$sfloor" '$3!=f{c++} END{print c+0}')
-  [ "$wrong" = 0 ] || badprice=$((badprice+1))
+  # TC-CLR-03 (v4) — every winner paid their OWN bid, every bid was at or above the floor, and
+  # the published cutoff is the lowest of them. Reading price_paid against the floor (v3's
+  # check) would now pass trivially and assert nothing.
+  paid=$(q "SELECT slot_index, price_paid FROM allocation WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3}')
+  if [ -n "$paid" ]; then
+    below=$(echo "$paid" | awk -v f="$sfloor" '$1 < f {c++} END{print c+0}')
+    lowest=$(echo "$paid" | sort -n | head -1)
+    [ "$below" = 0 ] || badprice=$((badprice+1))
+    [ "$lowest" = "$cutoff" ] || badprice=$((badprice+1))
+  elif [ "${cutoff:-0}" != "0" ]; then
+    badprice=$((badprice+1))          # nothing allocated, so there is no cutoff to publish
+  fi
+  # Every winning bid must be >= every losing bid in the same slot: that IS "decreasing order".
+  losers=$(q "SELECT slot_index, price, state FROM bid WHERE event_id = $EV" | grep -E "^ +$slot +\|" | grep '"lost"' | awk '{print $3}')
+  if [ -n "$paid" ] && [ -n "$losers" ]; then
+    hi_loser=$(echo "$losers" | sort -rn | head -1)
+    [ "$(echo "$cutoff >= $hi_loser" | bc -l 2>/dev/null || echo 1)" = "1" ] || badprice=$((badprice+1))
+  fi
 done
-[ "$badprice" = 0 ] && ok "TC-CLR-01/03 — clearingPrice == slot floor, every winner paid it" || bad "TC-CLR-01/03 — $badprice slots wrong"
+[ "$badprice" = 0 ] \
+  && ok "TC-CLR-03 — winners paid their own bids, cutoff == lowest winning bid, no loser above it" \
+  || bad "TC-CLR-03 — $badprice slots wrong"
 [ "$badalloc" = 0 ] && ok "TC-CLR-01 — allocated <= effectiveQuota in every slot" || bad "TC-CLR-01 — $badalloc slots over quota"
 
 quotas_after=$(q "SELECT slot_index, base_quota FROM slot WHERE event_id = $EV" | grep -E '^ +[0-9]+' | awk '{printf "%s,", $3}' | sed 's/,$//')
@@ -163,9 +193,36 @@ hw=$(q "SELECT origin FROM participant WHERE event_id = $EV AND has_won = true" 
 bw=$(q "SELECT origin FROM participant WHERE event_id = $EV AND has_won = true" | grep -c '"bot"')
 alloc=$(nrows "SELECT id FROM allocation WHERE event_id = $EV")
 rem=$(q "SELECT tickets_remaining FROM event WHERE id = $EV" | grep -oE '^ +[0-9]+' | tr -d ' ')
-{ [ "$alloc" = "$expect_t" ] && [ "$rem" = 0 ]; } \
-  && ok "TC-DASH-01 — sum(allocation)=$expect_t, ticketsRemaining=0" \
-  || bad "TC-DASH-01 — $alloc allocations, ticketsRemaining=$rem"
+# TC-DASH-01 (v4) — NOT a sell-out check any more.
+#
+# Under v3 the ladder always cleared, because a bot opted in at any floor its wallet covered, so
+# "ticketsRemaining == 0" was guaranteed and was quietly doing a test's job. Blind bidding
+# removes that guarantee on purpose: a reseller will not bid past resale-minus-margin (30,000 at
+# the locked parameters), and C5 caps each fan at one ticket — so a slot whose floor is above
+# both the reseller ceiling AND every remaining fan's wallet has NO possible bidder, and its
+# tickets are correctly left unsold. Asserting a sell-out here would demand the mechanism fail.
+#
+# The invariant that survives: allocations are conserved, and a ticket goes unsold only when no
+# funded, un-won bidder wanted it at that floor. That second half is what the entries-per-slot
+# line shows, and it is checked directly below.
+{ [ "$alloc" -le "$expect_t" ] && [ "$((alloc + rem))" = "$expect_t" ]; } \
+  && ok "TC-DASH-01 — $alloc allocated + $rem unsold = $expect_t, conserved" \
+  || bad "TC-DASH-01 — $alloc allocations + $rem remaining != $expect_t"
+
+# Every unsold ticket must be explained by an empty-handed slot, never by a slot that had a
+# willing bidder and refused them. `allocated < effectiveQuota` is only legitimate when
+# `entriesReceived <= allocated` — i.e. the slot took everyone who showed up.
+starved=0
+for slot in 0 1 2 3 4; do
+  row=$(q "SELECT slot_index, effective_quota, entries_received, filled FROM slot WHERE event_id = $EV" | grep -E "^ +$slot +\|" | awk '{print $3, $5, $7}')
+  set -- $row; eq=$1; er=$2; fl=$3
+  if [ "${fl:-0}" -lt "${eq:-0}" ] && [ "${er:-0}" -gt "${fl:-0}" ]; then
+    starved=$((starved+1))
+  fi
+done
+[ "$starved" = 0 ] \
+  && ok "TC-DASH-01b — every unfilled seat had no bidder, not a refused one" \
+  || bad "TC-DASH-01b — $starved slot(s) left a seat empty with entries still queued"
 q "SELECT state FROM event WHERE id = $EV" | grep -q '"settled"' && ok "state=settled" || bad "not settled"
 
 already=$(printf '%s\n' "${HUMAN_CODES[@]}" | grep -c 'E_ALREADY_WON' || true)

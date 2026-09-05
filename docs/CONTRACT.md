@@ -203,7 +203,7 @@ the whole transaction, **the last ticket purchase fails**. `close_slot` and `sub
 | `create_event` | `E_FLOORS_EMPTY` · `E_FLOORS_NOT_INCREASING` · `E_TICKET_PRICE_INVALID` · `E_FRACTION_INVALID` · `E_SLOT_WINDOW_INVALID` |
 | `start_countdown` | `E_NOT_ADMIN` · `E_WRONG_STATE` · `E_NO_PARTICIPANTS` |
 | `join` | `E_EVENT_SETTLED` · `E_HANDLE_COLLISION` *(retryable — pool regenerates the suffix)* |
-| `submit_bid` | `E_EVENT_NOT_OPEN` · `E_UNKNOWN_PARTICIPANT` · `E_WRONG_EVENT` · `E_ALREADY_WON` · `E_STALE_SLOT` · `E_PRICE_MISMATCH` · `E_INSUFFICIENT_BALANCE` · `E_SOLD_OUT` · `E_DUPLICATE_ENTRY` |
+| `submit_bid` | `E_EVENT_NOT_OPEN` · `E_UNKNOWN_PARTICIPANT` · `E_WRONG_EVENT` · `E_ALREADY_WON` · `E_STALE_SLOT` · `E_PRICE_MISMATCH` *(turn: `price < slot.floor`)* · `E_INSUFFICIENT_BALANCE` *(turn: `price > walletBalance` — checked against the BID, not the floor)* · `E_SOLD_OUT` · `E_DUPLICATE_ENTRY` |
 | `close_slot` | **throws nothing.** Scheduled reducers have no caller to receive an error, so every guard is a silent `return` that `console.info`s its code. `E_WRONG_STATE` and `E_STALE_TIMER` are observable in `spacetime logs`; `E_SLOT_ALREADY_CLOSED` is **unreachable** (below) |
 
 **`close_slot` returns, it does not throw — and that distinction is now written down** because
@@ -256,13 +256,19 @@ assert on **codes**, never on message text.
 ## 5. Wallet-debit contract
 
 **A debit happens if and only if an allocation happens, in the same reducer call, for exactly
-the slot's uniform price.** There is no other way money moves.
+the amount recorded on the allocation.** There is no other way money moves.
 
 1. **Co-transactional** with the allocation write. Never two calls, never a follow-up reducer,
    never a saga.
-2. **The amount is the slot's uniform price** — `ticketPrice` (queue) or `slot.floor` (turn) —
-   and equals the `pricePaid` on the `Allocation`. Under pay-the-floor there is no per-winner
-   price, so a debit differing from the row beside it is a bug by definition.
+2. **The amount is `ticketPrice` (queue) or the winner's OWN BID (turn)**, and equals the
+   `pricePaid` on the `Allocation`. Turn mode is blind bidding under pay-your-bid (v4), so two
+   allocations in the same slot routinely differ — `pricePaid` is per-row and is never
+   derivable from the slot. What must never differ is `pricePaid` from the `bid.price` it came
+   from, or from the debit taken in the same call.
+
+   *Changed in v4.* Through v3 this read "the slot's uniform price… a debit differing from the
+   row beside it is a bug by definition", which was true under pay-the-floor and is now exactly
+   backwards. See §7's C1 row and HLD §5b.
 3. **A losing entry costs nothing** — byte-identical balance, because a loser's path touches no
    wallet field at all.
 4. **No reservation / hold / escrow / pending state anywhere.** Grep-able: no column named
@@ -351,7 +357,7 @@ actually fails if the mechanism breaks.
 
 | | Property | Enforced by | Checked by |
 |---|---|---|---|
-| C1 | Allocation independent of arrival order | `drawSeed` derived from `(eventId, slotIndex, sorted(entry ids))`; ranking by `digest64(drawSeed, entry.id)`. `seq` and insertion order never read for ordering | **TC-INV-01** (shuffled array → identical allocations) + **TC-CLR-11** (χ² uniformity). Both are needed: INV-01 cannot see id-correlated bias, CLR-11 cannot see a direct read of `seq` |
+| C1 | Allocation independent of arrival order | Ranking is **price descending, then** `digest64(drawSeed, entry.id)` within a price tier, with `drawSeed` derived from `(eventId, slotIndex, sorted(entry ids))`. `seq` and insertion order are never read for ordering. Scope narrowed in v4: arrival order cannot separate two people **who bid the same amount**, and a higher bid is *meant* to beat a lower one | **TC-INV-01** (shuffled array → identical allocations) + **TC-CLR-11** (χ² uniformity). Both are needed: INV-01 cannot see id-correlated bias, CLR-11 cannot see a direct read of `seq` |
 | C2 | ≤1 entry per participant per slot | check-then-insert in `submit_bid`; safe **only** because reducers serialize. No schema constraint exists | ⚠️ **no automated test** — reducers are not unit-testable. Verified by CLI: a second `submit_bid` for the same `(participant, slot)` returns `E_DUPLICATE_ENTRY` |
 | C3 | All clients act on one committed state | single serialized `slot_result` write per slot | ⚠️ **no automated test** — needs multiple live clients. Structural: one write per close, inside the closing transaction |
 | C4 | No client acts before commit | seed derives from data that exists only at close — unpredictable in advance **to a passive observer**. NOT unpredictable to an adversary who chooses their own entries; see "the grinding case" below | ⚠️ **no automated test.** Structural, and the structure is checked: **TC-CLR-14** (no `ctx.random` in the clearing path) is what keeps the seed a function of committed state |

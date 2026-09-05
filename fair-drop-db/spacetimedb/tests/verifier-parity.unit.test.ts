@@ -56,7 +56,7 @@ describe('TC-CLR-09 — recompute.mjs is a real independent check on the module'
 
   it('reproduces the module winner set in the module ranking order', () => {
     const seed = deriveDrawSeed(EVENT_ID, SLOT_INDEX, IDS);
-    const entries: Entry[] = IDS.map(id => ({ id, participantId: id }));
+    const entries: Entry[] = IDS.map(id => ({ id, participantId: id, price: 0 }));
     const quota = 4;
     const expected = rankEntries(seed, entries).slice(0, quota).map(e => e.id);
 
@@ -69,6 +69,33 @@ describe('TC-CLR-09 — recompute.mjs is a real independent check on the module'
     // The verifier prints "  1. bid 1099" in draw order; read the ids back out in that order.
     const got = [...out.matchAll(/^\s*\d+\.\s+bid\s+(\d+)$/gm)].map(m => BigInt(m[1]));
     expect(got).toEqual(expected);
+  });
+
+  it('agrees with the module on the PRICED ranking, not just the hash', () => {
+    // The parity that matters after v4. Bare ids exercise only the tie-break path — if the
+    // verifier never learned about price it would still pass every other case in this file
+    // while disagreeing with the module about every real slot.
+    const priced: Entry[] = IDS.map((id, i) => ({
+      id,
+      participantId: id,
+      // Two entries share 55_000 on purpose, so the tie-break is exercised inside a priced set.
+      price: [91_000, 55_000, 74_500, 30_000, 55_000, 41_200, 62_000][i],
+    }));
+    const seed = deriveDrawSeed(EVENT_ID, SLOT_INDEX, IDS);
+    const quota = 5;
+    const expected = rankEntries(seed, priced).slice(0, quota).map(e => e.id);
+
+    const out = verifier([
+      '--seed', seed,
+      '--quota', String(quota),
+      '--ids', priced.map(e => `${e.id}:${e.price}`).join(','),
+    ]);
+
+    const got = [...out.matchAll(/^\s*\d+\.\s+bid\s+(\d+)$/gm)].map(m => BigInt(m[1]));
+    expect(got).toEqual(expected);
+    // And it must report the cutoff a third party would quote back at us.
+    expect(out).toContain(`cutoff (lowest winning bid): ${
+      priced.find(e => e.id === expected[expected.length - 1])!.price}`);
   });
 
   it('agrees with the module across many independent slots, not one lucky vector', () => {

@@ -9,6 +9,7 @@
 // stays trivial (task file: "Do not add strategy; its absence is the finding, not a gap").
 
 import { queueDelayMs } from "./decide.ts";
+import { botBidCeiling } from "./config.ts";
 import { joinBotWithRetry, runOneTurnBotSlot, type BotClient } from "./runner.ts";
 
 /**
@@ -85,6 +86,9 @@ export async function runOneTurnBot(
             hasWon: fresh.hasWon,
             walletBalance: fresh.walletBalance,
             floor: slot.floor,
+            // Every bot in the fleet shares one resale view, because they are modelling one
+            // secondary market — not 400 independent opinions about what the ticket is worth.
+            ceiling: botBidCeiling(),
           });
         }
       }

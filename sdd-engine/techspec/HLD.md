@@ -40,6 +40,9 @@ the real turnout range (50–250 humans, 4:1 bots) invalidated all four — see 
 evidence. v3 locks in:
 
 1. **Clearing rule is random-among-qualifying, pay-the-floor** — not price-ranked pay-as-bid.
+   *(Superseded in v4 — see §5b. Blind per-slot bidding, resolved in decreasing order, winners
+   pay their own bid. §5a's evidence is retained because its reasoning is still correct for the
+   population it modelled; §5b is why that population was the wrong one.)*
 2. **Inventory scales with turnout** — `totalTickets = 40%` of registered participants,
    computed when the event opens, not when it is created.
 3. **One ticket per participant per event** — winners are excluded from all later slots.
@@ -301,6 +304,57 @@ the person next to you, not the eligibility effect of the posted prices.
 equal, verifiable chance at it, and no amount of speed or money improves those odds within
 that slot. That is a narrower claim than "efficient price discovery," and it is the one the
 system can actually support.
+
+
+### 5b. v4 — blind bidding, because §5a modelled bots as rich fans
+
+**§5a's model has a hole and its headline number is an artefact.** `build_pool` draws bots and
+humans from ONE wallet distribution, and every eligible participant bids `uniform(floor,
+wallet)` — identical behaviour, identical means. Under that assumption no clearing rule can move
+the human share, so "19.8% pay-as-bid vs 19.9% random" was never a finding about bots. It was a
+restatement of the assumption. Everything §5a says about *wealth ordering* stands; everything it
+implies about *scalpers* was out of its reach.
+
+**A reseller is not a rich fan.** A fan's ceiling is what the night is worth to them. A
+reseller's is arithmetic — `resale price x (1 - margin)` — and the resale price is not free
+either: they can only sell to fans who did not get in, so if they hold N tickets the realised
+price is the N-th highest valuation among unserved fans. `sim.py`'s reseller arm (TC-EXP-08)
+solves that fixed point instead of assuming it, starting deliberately *optimistic* for the
+scalper at ₹1.5L and letting the iteration push it wherever it goes.
+
+Supply is sized from the FAN count in this arm, not from turnout. Turnout-scaled inventory means
+more bots create more tickets, which dilutes the very scarcity scalping feeds on — fine as a
+property of this demo, misleading as a model of a real drop.
+
+| Rule | Human share | Richest-fan overlap | Fan pays | Realised resale | Scalper profit |
+|---|---|---|---|---|---|
+| v3 pay-the-floor + draw | 18.1% | 8.3% | ₹30,805 | ₹1,03,822 | **₹58,24,500** |
+| **v4 blind bid, pay-as-bid** | **100%** | 93.0% | ₹1,03,526 | ₹3,810 | **₹1,238** |
+
+**The scalping business stops existing.** Not "is reduced" — the fixed point converges to a
+resale market with no buyers, because everyone who would have bought on it already won at the
+primary. A reseller cannot outbid the fans whose valuations set the price, since those same fans
+are their only customers. ₹58 lakh of extractable margin becomes ₹1,238.
+
+**What it costs, stated plainly.** Two things get worse and neither should be buried:
+
+1. **Fans pay ~₹1L instead of ₹31k.** The scarcity rent does not disappear; it moves from the
+   scalper to the seller. The honest comparison is not ₹31k vs ₹1L — it is ₹1L paid to a
+   scalper by 82% of fans, against ₹1L paid to the seller by all of them.
+2. **The room becomes wealth-ordered: 93% richest-fan overlap, against 8.3% under the draw.**
+   Sealed bidding softens this (a modest fan bidding all-in beats a rich fan who hedged) but
+   only from ~100% to 93%. The v3 draw's genuine achievement was giving a low-income fan a real
+   shot at ₹31k, and v4 gives them none. That is a values decision, taken deliberately.
+
+**The third door, not taken.** Binding the ticket to identity collapses the resale price — and
+therefore the scalper's ceiling — while keeping ₹31k pricing and the equal chance. It is what
+the economics actually points at, and it is out of scope for a demo that cannot enforce
+admission.
+
+**C1 is narrowed, not abandoned.** Arrival order still cannot separate two people who bid the
+same amount: the hash draw now orders entries *within* a price tier, and a tier is the common
+case because the floor is a focal point. What v4 gives up is the claim that spending power does
+not matter — it now does, by design.
 
 ## 6. Bots
 

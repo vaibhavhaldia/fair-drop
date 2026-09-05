@@ -31,7 +31,9 @@ DB="${DB:-fairdrop-scratch}"
 SERVER="${SERVER:-local}"
 H="${H:-10}"                      # humans; recipe requires >= 8, targets 10
 TICKET_PRICE="${TICKET_PRICE:-15000}"
-FRACTION="${FRACTION:-0.40}"
+# 0.20 since v4, matching Round 2 — the rounds must share every parameter but the rule, or
+# "same people, same tickets, same wallets" stops being true. See DEMO-RECIPE Stage 2.
+FRACTION="${FRACTION:-0.20}"
 HUMAN_LAG_MS="${HUMAN_LAG_MS:-1500}"   # see the box above
 LABEL="${1:-round1}"
 
@@ -94,7 +96,7 @@ read -r wn wmm woob wfrac wu < /tmp/wallets.$$; rm -f /tmp/wallets.$$
 # --- 1.2 Act ------------------------------------------------------------------------------
 spacetime call --server "$SERVER" "$DB" start_countdown "$EV" >/dev/null 2>&1
 row=$(q "SELECT state, total_tickets, tickets_remaining, participants_at_open FROM event WHERE id = $EV")
-expect_t=$(( (H * 5 * 40 + 50) / 100 ))   # round(0.40 * 5H), exact at demo scale
+expect_t=$(( (H * 5 * 20 + 50) / 100 ))   # round(0.20 * 5H), exact at demo scale
 if echo "$row" | grep -qE "\"countdown\" +\| +$expect_t +\| +$expect_t +\| +$want"; then
   ok "TC-EVT-10/17 — totalTickets=$expect_t, ticketsRemaining=$expect_t, participantsAtOpen=$want"
 else bad "TC-EVT-10/17 — $row"; fi
