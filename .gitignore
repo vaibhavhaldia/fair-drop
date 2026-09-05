@@ -1,3 +1,4 @@
 node_modules/
 *.pyc
 fair-drop-db/spacetimedb/dist/
+clients/web/dist/
