@@ -1,2 +1,3 @@
 fair-drop-db/spacetimedb/node_modules
 *.pyc
+fair-drop-db/spacetimedb/dist/
