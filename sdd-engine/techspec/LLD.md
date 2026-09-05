@@ -249,11 +249,11 @@ advantage, not bot participation. The claim is proportionality, not exclusion.
 
 ### 1c. SpacetimeDB TS module shape
 
-**Pinned version: `spacetimedb@2.8.3` exactly** (not `2.8.*`). There is no LTS line — 2.8.x is
-simply the release line we froze on; `latest` has since moved to 2.10.x. The pin, not a support
-channel, is the stability mechanism, so a floating range would silently defeat it. Everything
-below was verified against 2.8's own TS reference (vendored at `fair-drop-db/CLAUDE.md`), not
-assumed from 2.0.
+**Pinned version: `spacetimedb@2.10.0` exactly** (not `2.10.*`), matched to CLI 2.10.0. There
+is no LTS line — 2.10.x is simply the release line we froze on. The pin, not a support channel,
+is the stability mechanism, so a floating range would silently defeat it. Everything below was
+verified against the 2.x TS reference (vendored at `fair-drop-db/CLAUDE.md`), not assumed from
+2.0, and re-confirmed on 2.10.0 by the §10 spike.
 
 SpacetimeDB v2.x TS modules use a **schema-builder API**, not decorators — tables are values
 built with `table()` + the `t.*` type builder, collected into one `schema({...})`, and reducers
@@ -632,7 +632,12 @@ if event.mode == "queue":
     participant.walletBalance -= price
     participant.hasWon := true
     event.ticketsRemaining -= 1
-    if event.ticketsRemaining == 0: call settle(event.id)   // sell-out settles immediately
+    if event.ticketsRemaining == 0: call settleImpl(ctx, event.id)   // sell-out settles
+                                                    // immediately. settleImpl, NOT settle —
+                                                    // the exported reducer carries E_NOT_ADMIN
+                                                    // and ctx.sender here is the buyer, so
+                                                    // calling it would throw and roll back
+                                                    // this very purchase (§2a)
     // NOTE: no Bid row is written in queue mode — the Allocation IS the record (§1)
 
 if event.mode == "turn":
@@ -717,13 +722,22 @@ write SlotResult { slotIndex: event.currentSlotIndex, clearingPrice: slot.floor,
 
 nextIndex := event.currentSlotIndex + 1
 if nextIndex >= event.slotCount or event.ticketsRemaining == 0:
-    call settle(event.id)                          // unfilled on the LAST slot is discarded,
+    call settleImpl(ctx, event.id)                 // settleImpl, NOT settle — close_slot is
+                                                    // scheduler-invoked and would fail the
+                                                    // E_NOT_ADMIN guard on the reducer (§2a).
+                                                    // Unfilled on the LAST slot is discarded,
                                                     // not rolled — there is nowhere to roll it
 else:
     slot[nextIndex].effectiveQuota += unfilled     // rollover — CONFIRMED, see header.
                                                     // baseQuota is NEVER touched here; that is
                                                     // what keeps sum(baseQuota) == totalTickets
-                                                    // true for the life of the event (§2)
+                                                    // true for the life of the event (§2).
+                                                    // NOTE: `unfilled` is always 0 at the
+                                                    // locked parameters — this branch is
+                                                    // correct but never observed on stage.
+                                                    // CONTRACT §6 carries the measurement;
+                                                    // test it against the pure module, not
+                                                    // by running the demo.
     event.currentSlotIndex := nextIndex
     event.currentSlotEndsAt := now() + W
     schedule close_slot(event.id) at event.currentSlotEndsAt

@@ -17,7 +17,7 @@ Legend: **A**rrange · **A**ct · **C**heck.
 |---|---|
 | **A** | `cd fair-drop-db/spacetimedb && npm ci --ignore-scripts` |
 | **A** | `export PATH="$HOME/.local/bin:$PATH"` — the CLI is installed but **not on PATH** |
-| **A** | `spacetime --version` → must read **2.9.0**. If it reads 2.10.0, run `spacetime version use 2.9.0` — 2.9.0 is the version §10's verification table was recorded against; 2.10.0 against the 2.8.3 lib is untested |
+| **A** | `spacetime --version` → must read **2.10.0**, matching `spacetimedb@2.10.0` in `package.json`. It is `current`, so this normally just passes; if it reads anything else, `spacetime version use 2.10.0`. CLI and lib are pinned to the same version on purpose — CONTRACT §1 |
 | **A** | `spacetime start` in its own terminal — leave it running, it is the demo |
 | **Act** | `spacetime publish -p fair-drop-db/spacetimedb fairdrop --server local -y` |
 | **Act** | `spacetime call --server local fairdrop add '"smoke"'` |
@@ -143,8 +143,30 @@ only your word for it.
 | **Act** | Slot closes automatically via `slot_schedule` |
 | **C** ✅ | One `slot_result` row: `clearingPrice == slot.floor`, `allocated <= effectiveQuota` · **TC-CLR-01** |
 | **C** ✅ | Every winner in the slot paid **exactly** that floor · **TC-CLR-03** |
-| **C** ✅ | Unfilled quota appears in the next slot's `effectiveQuota`; `baseQuota` **unchanged** · **TC-ROLL-01** |
+| **C** ✅ | `baseQuota` **unchanged** by the close — rollover writes to `effectiveQuota` only · **TC-EVT-09** |
+| **C** 👀 | `effectiveQuota == baseQuota` on every slot. **Expect no rollover — that is correct, not a failure.** See the box below |
 | **C** 👀 | Eligible field visibly shrinks as floors rise past wallets — the visual drama |
+
+> ### ⚠ Rollover will not fire, and you must not "fix" it on stage
+>
+> Under the locked parameters — floors 15/22/30/40/55k, wallets U[₹20k, ₹1.5L], fraction 0.40 —
+> **unfilled quota never occurs.** Measured over 1,000 simulated runs at every turnout from
+> H = 8 to H = 250: **0 runs with any rollover.** At H = 10 the eligible field goes
+> 50 → 46 → 41 → 34 → 28 against a quota of 4; it thins visibly but never falls below quota.
+>
+> This is structural. Quota is 8% of the population (`0.40 / 5`), while even the ₹55,000 top
+> floor leaves 56% of the wallet distribution eligible. Making rollover appear requires a top
+> floor around **₹1,30,000** — and at that point tickets start going **unsold** (19.6 of 20 at
+> ₹1.3L, 16 of 20 at ₹1.5L), because the last slot cannot fill and there is nowhere left to
+> roll. **Rollover firing and "the event sells out" are mutually exclusive at five slots**, and
+> Stage 2.3 asserts the sell-out. Raising the floor also pushes average price paid from
+> ₹32,400 toward ₹45,000 against a ₹15,000 face value — reintroducing exactly the markup
+> HLD §5a rejected pay-as-bid for.
+>
+> So: the rollover path is **built and correct, but not exercised by this demo**. `TC-ROLL-01`
+> is a unit test against the pure inventory module, not a stage check — it was previously
+> listed here as a blocking `✅`, which could never pass. If you see rollover on stage,
+> something has changed in the parameters; check the floors before anything else.
 
 ### 2.3 Check — the claim
 

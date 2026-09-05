@@ -51,14 +51,14 @@ second rehearsal.
 
 ### 1a. Toolchain spike — ✅ ALREADY DONE 2026-09-05, skip it
 
-Stage 0 of `DEMO-RECIPE.md` ran green. `npm ci` clean (2.8.3, 0 vulnerabilities); CLI **v2.9.0**
-at `~/.local/bin/spacetime` (**not on PATH** — `export PATH="$HOME/.local/bin:$PATH"`); publish,
-`call`, `sql` and `logs` all round-trip against a local instance.
+Stage 0 of `DEMO-RECIPE.md` ran green. `npm ci` clean (**2.10.0**, 0 vulnerabilities); CLI
+**v2.10.0** at `~/.local/bin/spacetime` (**not on PATH** — `export PATH="$HOME/.local/bin:$PATH"`);
+publish, `call`, `sql` and `logs` all round-trip against a local instance.
 
-**⚠ The CLI has since moved to 2.10.0** (`current` switched after the verification ran). That
-combination is unverified against the 2.8.3 lib. Run `spacetime --version` first; if it reads
-2.10.0, `spacetime version use 2.9.0` — both are installed. Do not spend Gate 1 re-verifying
-2.10.0.
+**CLI and lib are both 2.10.0** — matched on purpose, so there is no version-skew step to
+remember. 2.10.0 is already `current`; `spacetime --version` should just pass. The full §10
+table was re-run end-to-end on this pair, so nothing in it is inherited from the older
+2.9.0/2.8.3 pairing.
 
 **Every contract claim is now build-proven** — see `CONTRACT.md` §10 for the table. The two
 that were open are both resolved in our favour:

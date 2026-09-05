@@ -14,16 +14,18 @@ to need something this document doesn't provide, that is an **escalation**, not 
 
 | Item | Frozen value |
 |---|---|
-| SpacetimeDB | **`spacetimedb@2.8.3` exactly** — not `2.8.*` |
+| SpacetimeDB | **`spacetimedb@2.10.0` exactly** — not `2.10.*` |
 | Module path | `fair-drop-db/spacetimedb/` — **not** `module/`, which does not exist |
 | Module tests | `fair-drop-db/spacetimedb/tests/` |
 | Test runner | **vitest**. 4h build writes only the pure tier (TC-INV-01, TC-CLR-09); the `*.int.test.ts` tier below is designed, not built |
 | Demo target | **local `spacetime start`**; Maincloud optional |
-| CLI | **Pin to v2.9.0** — `spacetime version use 2.9.0`. Installed at `~/.local/bin/spacetime`, NOT on PATH — `export PATH="$HOME/.local/bin:$PATH"`. 2.9.0 skew against the 2.8.3 lib is **verified harmless** (§10): publish, call, sql and procedures all work. **2.10.0 is also installed and `current` has moved to it — that combination is NOT verified.** Check with `spacetime --version` before Stage 0 and pin back if it reads 2.10.0 |
+| CLI | **v2.10.0 — matched to the lib, no skew.** Installed at `~/.local/bin/spacetime`, NOT on PATH — `export PATH="$HOME/.local/bin:$PATH"`. 2.10.0 is `current`, so no `spacetime version use` step is needed; check with `spacetime --version` before Stage 0 and run `spacetime version use 2.10.0` only if it reads something else. The full §10 table was **re-verified end-to-end on this pair** on 2026-09-05 |
 
-**There is no LTS.** 2.8.x is a release line, not a support channel (`latest` has since moved
-to 2.10.x). The exact pin *is* the stability mechanism, which is why a floating range would
-defeat it.
+**There is no LTS.** 2.10.x is a release line, not a support channel. The exact pin *is* the
+stability mechanism, which is why a floating range would defeat it. **CLI and lib are pinned to
+the same version deliberately** — the earlier 2.9.0-CLI/2.8.3-lib pairing worked, but a skew
+you have to remember to re-establish on every rig is a demo-morning failure waiting to happen.
+Matched versions remove the check entirely.
 
 **Supply-chain rules** — all five, everywhere in the repo, not just the module:
 
@@ -87,7 +89,7 @@ primary key. There are **no composite unique constraints** — SpacetimeDB suppo
 | | `adminIdentity` | whoever creates the event is its admin — self-establishing, no bootstrap |
 | | `endTime` | written only by `settle` |
 | `slot` | `baseQuota` | set once at `start_countdown`, **never mutated**. `sum(baseQuota) == totalTickets` for the life of the event — assert against this |
-| | `effectiveQuota` | `baseQuota` + rollover. **Deliberately exceeds** `totalTickets` once anything rolls forward. `close_slot` allocates against this |
+| | `effectiveQuota` | `baseQuota` + rollover. **Deliberately exceeds** `totalTickets` once anything rolls forward. `close_slot` allocates against this. **At the locked parameters it always equals `baseQuota`** — see §6 |
 | `participant` | `id` | PK — **not** `identity` |
 | | `eventId` | registration is **per event**; C5 is per-event by construction |
 | | `identity` | indexed, **not unique** — one pooled connection backs many rows |
@@ -107,7 +109,7 @@ exactly.
 **Ids are `t.u64()` → `bigint`**, which does not survive `JSON.stringify`. The SDK owns
 bigint↔string conversion at its boundary; no consumer does it itself.
 
-### Four API corrections vs. the v2 draft
+### Five API corrections vs. the v2 draft
 
 Each would have failed at build on first contact:
 
@@ -115,7 +117,13 @@ Each would have failed at build on first contact:
 2. The **`scheduled:` option lives on the table**, not as `onSchedule` on the reducer. The
    reducer receives the schedule row as its single argument; the runtime deletes it after.
 3. `t.u64()` is **`bigint`**, not `number`.
-4. Table names snake_case, columns camelCase (client codegen converts case; the server does not).
+4. Table names snake_case, columns camelCase (client codegen converts case; the server does
+   not). `spacetime sql` accepts **either** casing in a query and renders `SELECT *` headers
+   snake_cased — verified, so §10's Stage 3 queries are safe as written.
+5. **`.primaryKey().autoInc()` does not make the column optional at insert.** `insert()` takes
+   the full row type, so every insert must pass a placeholder — `id: 0n` — and read the real
+   id off the **returned row**. This bites every table in §2, since all nine have a `u64`
+   autoInc PK.
 
 `mode`/`state`/`origin` are **`t.string()`, not `t.enum()`** — 2.8 documents `t.enum()` only as
 a tagged union with payloads, and a payload-free variant is undocumented. Literal sets:
@@ -286,6 +294,24 @@ baseQuota[i] := base + (i < remainder ? 1 : 0)
 is exactly `totalTickets`, and rollover moves only the unfilled portion forward, neither
 creating nor destroying any. Do not add a defensive clamp; it would mask a real allocation bug.
 
+**Rollover is implemented but never fires at the locked parameters — this is expected.**
+Measured 2026-09-05 over 1,000 simulated events at every turnout from H = 8 to H = 250:
+**zero runs with any unfilled quota.** Per-slot quota is `0.40 / 5` = 8% of the population,
+while even the ₹55,000 top floor leaves 56% of the U[₹20k, ₹1.5L] wallet distribution
+eligible; at H = 10 the eligible field runs 50 → 46 → 41 → 34 → 28 against a quota of 4.
+
+Making rollover appear needs a top floor near **₹1,30,000**, at which point tickets start
+going **unsold** (19.6 of 20; 16 of 20 at ₹1.5L) because the final slot cannot fill and there
+is nowhere left to roll — so **rollover firing and full sell-out are mutually exclusive at
+five slots**, and the demo asserts sell-out. It would also push average price paid from
+₹32,400 toward ₹45,000 against a ₹15,000 face value, reintroducing the markup §5a of the HLD
+rejects pay-as-bid for.
+
+Consequences, all deliberate: keep the rollover code path (the arithmetic is right and the
+parameters are not frozen forever); test it only against the **pure inventory module** with a
+hand-built entry set (`TC-ROLL-*`); and do **not** make it a stage check — `DEMO-RECIPE.md`
+Stage 2.2 previously carried `TC-ROLL-01` as a blocking `✅` that could never pass.
+
 ---
 
 ## 7. Invariants — enforcement points
@@ -353,23 +379,30 @@ docs-derived**. No open questions remain from this list.
 | `scheduled: (): any => reducerRef` on the **table** | ✅ compiles and registers |
 | Multi-column btree via `indexes: [{accessor, algorithm, columns}]` | ✅ compiles |
 | `t.identity().index('btree')` non-unique | ✅ **three participants created from one identity** — Blocker A's fix works in practice |
-| `t.string().unique()` on `handle` | ✅ duplicate insert **throws** — `E_HANDLE_COLLISION` is a real, catchable path |
-| **Procedures return values to the caller** | ✅ `join_proc` returned `[1, 26029.0]` — the id and wallet. **The §3 fallback is NOT needed** |
-| `ctx.random.integerInRange(20_000, 150_000)` | ✅ distinct integers in range: 26029 / 46241 / 147144 |
+| `t.string().unique()` on `handle` | ✅ duplicate insert **throws and rolls back** — the row does not land, so `E_HANDLE_COLLISION` is a real, catchable path |
+| **Procedures return values to the caller** | ✅ `join_proc` returned `[1.0, 69565.0]` — the id and wallet. **The §3 fallback is NOT needed** |
+| `ctx.random.integerInRange(20_000, 150_000)` | ✅ distinct integers in range: 69565 / 147207 / 101813 |
 | `ctx.withTx(tx => ...)` inside a procedure | ✅ insert + return in one transaction |
-| CLI 2.9.0 vs lib 2.8.3 | ✅ no incompatibility observed |
+| CLI 2.10.0 vs lib 2.10.0 (matched) | ✅ publish, `call`, `sql` all round-trip |
+| `.primaryKey().autoInc()` insert | ⚠️ the column is **still required** in the insert argument — pass `id: 0n` and read the assigned id off the returned row |
 
-> **⚠ The CLI moved after this table was recorded.** Everything above ran on CLI **2.9.0**. The
-> toolchain has since switched `current` to **2.10.0**, which is unverified against the 2.8.3
-> lib. Both versions are installed; `spacetime version use 2.9.0` restores the verified one.
-> Re-verifying on 2.10.0 is a Stage 0 cost nobody budgeted — pin back instead.
+**Reproducing this table.** `fair-drop-db/spacetimedb/spike/verify-api.ts` is the artifact —
+run instructions are in its header. It publishes to a **separate** database (`fairdrop-spike`)
+and never overwrites the real module. The whole table above was reproduced from it on
+2026-09-05 against CLI 2.10.0 + lib 2.10.0; the recorded run:
 
-**Reproducing this table.** The original spike source was reverted and `dist/` is now
-gitignored, so these claims had no artifact left in the repo. `fair-drop-db/spacetimedb/spike/verify-2.8-api.ts`
-reconstructs them — run instructions are in its header; it publishes to a **separate**
-database (`fairdrop-spike`) and never overwrites the real module. It is a reconstruction from
-the shapes recorded here, not the original bytes: **if it fails to build, that is a finding
-about this table, not a bug in the spike.** Escalate before working around it.
+```
+$ spacetime call --server local fairdrop-spike join_proc '"Asha"'    → [1.0,69565.0]
+$ spacetime call --server local fairdrop-spike join_proc '"Bilal"'   → [2.0,147207.0]
+$ spacetime call --server local fairdrop-spike join_proc '"Chitra"'  → [3.0,101813.0]
+$ spacetime sql  --server local fairdrop-spike "SELECT * FROM participant"
+  3 rows, one shared identity, handles Asha-b014 / Bilal-952 / Chitra-a711
+$ spacetime call --server local fairdrop-spike force_handle_collision '"dupe"'   → ok
+$ spacetime call --server local fairdrop-spike force_handle_collision '"dupe"'   → error, row NOT inserted
+```
+
+**If the spike stops building, that is a finding about this table, not a bug in the spike.**
+Escalate before working around it.
 
 **One naming rule discovered:** the CLI exposes exported members **snake_cased** —
 `export const joinProc` is called as `join_proc`, `closeSlot` as `close_slot`. This happens to

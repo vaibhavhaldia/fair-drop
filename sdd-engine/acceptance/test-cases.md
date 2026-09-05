@@ -330,6 +330,16 @@ Traces: HLD §3.3 (confirmed), LLD §2, §11.
 
 > Rollover is **confirmed**, not assumed. Examples below use the 1,250-participant case:
 > `totalTickets = 500`, base quota 100 per slot.
+>
+> **⚠ Not exercised by the demo — these are pure-module unit tests only.** Under the locked
+> parameters (floors 15/22/30/40/55k, wallets U[₹20k, ₹1.5L], fraction 0.40) unfilled quota
+> **never occurs**: 0 runs with any rollover across 1,000 simulated events at every turnout
+> from H = 8 to H = 250. Quota is 8% of the population while the ₹55,000 top floor still
+> leaves 56% of wallets eligible. The scenarios below must therefore be constructed by
+> **feeding the pure inventory module a hand-built entry set** — they cannot be produced by
+> running the demo, and `TC-ROLL-01` was wrongly listed as a blocking stage check in
+> `DEMO-RECIPE.md` Stage 2.2 (now demoted; see the box there for why forcing rollover would
+> also break the sell-out assertion in Stage 2.3).
 
 
 | ID         | Level | P   | Case                                                                                                                       |
