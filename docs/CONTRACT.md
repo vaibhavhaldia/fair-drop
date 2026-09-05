@@ -316,13 +316,24 @@ Stage 2.2 previously carried `TC-ROLL-01` as a blocking `✅` that could never p
 
 ## 7. Invariants — enforcement points
 
-| | Property | Enforced by |
-|---|---|---|
-| C1 | Allocation independent of arrival order | `drawSeed` derived from `(eventId, slotIndex, sorted(entry ids))`; ranking by `hash(drawSeed, entry.id)`. `seq` and insertion order never read for ordering |
-| C2 | ≤1 entry per participant per slot | check-then-insert in `submit_bid`; safe **only** because reducers serialize. No schema constraint exists |
-| C3 | All clients act on one committed state | single serialized `slot_result` write per slot |
-| C4 | No client acts before commit | seed derives from data that exists only at close — unpredictable in advance |
-| C5 | ≤1 ticket per participant per event | `participant.hasWon`, checked in `submit_bid` and again in `close_slot`; per-event by construction via `participant.eventId` |
+**Rule for this section:** every row names the test that enforces it, or says plainly that
+nothing does. A claim with no test behind it is a hope, and this document has already shipped
+one — see the avalanche note below. "Enforced by" describes the mechanism; "Checked by" is what
+actually fails if the mechanism breaks.
+
+| | Property | Enforced by | Checked by |
+|---|---|---|---|
+| C1 | Allocation independent of arrival order | `drawSeed` derived from `(eventId, slotIndex, sorted(entry ids))`; ranking by `digest64(drawSeed, entry.id)`. `seq` and insertion order never read for ordering | **TC-INV-01** (shuffled array → identical allocations) + **TC-CLR-11** (χ² uniformity). Both are needed: INV-01 cannot see id-correlated bias, CLR-11 cannot see a direct read of `seq` |
+| C2 | ≤1 entry per participant per slot | check-then-insert in `submit_bid`; safe **only** because reducers serialize. No schema constraint exists | ⚠️ **no automated test** — reducers are not unit-testable. Verified by CLI: a second `submit_bid` for the same `(participant, slot)` returns `E_DUPLICATE_ENTRY` |
+| C3 | All clients act on one committed state | single serialized `slot_result` write per slot | ⚠️ **no automated test** — needs multiple live clients. Structural: one write per close, inside the closing transaction |
+| C4 | No client acts before commit | seed derives from data that exists only at close — unpredictable in advance | ⚠️ **no automated test.** Structural, and the structure is checked: **TC-CLR-14** (no `ctx.random` in the clearing path) is what keeps the seed a function of committed state |
+| C5 | ≤1 ticket per participant per event | `participant.hasWon`, checked in `submit_bid` and again in `close_slot`; per-event by construction via `participant.eventId` | ⚠️ **no automated test.** Verified by CLI: a repeat buy returns `E_ALREADY_WON`; `close_slot`'s re-check is defence-in-depth that should never fire |
+
+Three of the five invariants have **no automated test**, and that is a fact about the platform,
+not a decision — `spacetimedb/server` cannot be loaded in vitest (§1). Do not read the empty
+cells as "probably fine". They are the cells where a regression would be silent, and they are
+the reason `DEMO-RECIPE.md` Stage 0 is now an executable script (`scripts/smoke.sh`) rather
+than a table of commands.
 
 `entry.id` **is** read by the allocator — but only as a hash input, never as an ordering, and
 the seed uses the sorted *set*. This distinction is the hinge C1 turns on.
@@ -451,14 +462,25 @@ match the reducer names in §3, so nothing changes — but call them by the snak
 
 ## 11. Change control
 
-Anything in this document changes **only by agreement of both engineers**, recorded here with
-the reason. Specifically frozen against silent revision:
+**Amended 2026-09-06.** "Frozen" was written for two engineers working in parallel, where the
+risk was silent divergence. With one engineer the risk inverts: the document goes stale and
+stays confident. So the rule is now **record the reason, not forbid the change** — this file was
+amended three times on the night of 2026-09-05 and each amendment was correct.
+
+What has not changed: the items below are frozen against *silent* revision. Edit them freely
+when you have a reason; write the reason down. Deleting one because it looks redundant is the
+failure mode, and it has already happened once (TC-CLR-11).
+
+Specifically frozen against silent revision:
 
 - `seq` (deletion looks obviously correct and breaks TC-INV-03 / TC-SCH-05)
 - the `ctx.random` prohibition in `close_slot` (violating it passes every behavioural test)
 - guard order in `submit_bid`
 - `baseQuota` immutability
 - the remainder-to-earliest-slots rule
+- **the draw hash's avalanche requirement** (raw FNV-1a shipped and violated C1 silently; the
+  finalizer looks like removable complexity and is not — §7, TC-CLR-11)
+- **TC-CLR-11 itself** (cut once as redundant with TC-INV-01; it is not, and the cut shipped a bug)
 
 If a test seems to require breaking one of these, the test is wrong or the need is an
 escalation — not a reason to edit this file.

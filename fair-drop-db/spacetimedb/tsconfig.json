@@ -9,6 +9,7 @@
     "strict": true,
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
 
     /* The following options are required by SpacetimeDB

@@ -9,7 +9,7 @@
  * design has drifted — escalate rather than importing it.
  */
 
-import { digest64, toHex64 } from './hash';
+import { digest64, toHex64 } from './hash.ts';
 
 /** One committed entry in a slot. `id` is the `bid` row's PK. */
 export interface Entry {

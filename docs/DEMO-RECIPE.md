@@ -19,10 +19,16 @@ Legend: **A**rrange · **A**ct · **C**heck.
 | **A** | `export PATH="$HOME/.local/bin:$PATH"` — the CLI is installed but **not on PATH** |
 | **A** | `spacetime --version` → must read **2.10.0**, matching `spacetimedb@2.10.0` in `package.json`. It is `current`, so this normally just passes; if it reads anything else, `spacetime version use 2.10.0`. CLI and lib are pinned to the same version on purpose — CONTRACT §1 |
 | **A** | `spacetime start` in its own terminal — leave it running, it is the demo |
-| **Act** | `spacetime publish -p fair-drop-db/spacetimedb fairdrop-demo --server local -y --delete-data=always` |
-| **Act** | `spacetime call --server local fairdrop-demo create_event '"smoke"' '"queue"' '0.40' '15000' '[]'` |
-| **Act** | `spacetime sql --server local fairdrop-demo "SELECT id, name, mode, state FROM event"` |
-| **C** ✅ | The row comes back, `state = "created"`. **If this fails, stop — nothing downstream matters.** |
+| **Act** | `./scripts/smoke.sh` |
+| **C** ✅ | Prints **Stage 0 passed — 7 checks**. **If it fails, stop — nothing downstream matters.** |
+
+> **Stage 0 is a script, not a checklist, and that is deliberate.** It used to be four commands
+> in this table; when the scaffold was deleted at Gate 1 it went on describing `add` and
+> `person`, neither of which existed any more, and nothing noticed — prose that rots stays
+> confident, a script that rots *fails*. `scripts/smoke.sh` checks the CLI pin, that the
+> instance is actually up, the publish, the procedure return path, the row landing, the pure
+> tests, and — the one nothing else covers — that `recompute.mjs` still agrees with the
+> module's own hash. Drift there silently voids TC-CLR-09 while every test stays green.
 
 > **The database is `fairdrop-demo`, not `fairdrop`.** The bare name `fairdrop` is already
 > claimed on the local instance by an earlier (pre-login) identity, and publishing to it fails
