@@ -215,13 +215,35 @@ type Ctx = { db: any; sender: any; timestamp: any; random: any };
 
 function loadEvent(ctx: Ctx, eventId: bigint) {
   const row = ctx.db.event.id.find(eventId);
-  if (row === undefined) throw new SenderError('E_UNKNOWN_EVENT');
+  // `find` returns null, not undefined — `=== undefined` would never fire and the
+  // next property read would panic instead of returning a clean sender error.
+  if (row == null) throw new SenderError('E_UNKNOWN_EVENT');
   return row;
 }
 
 function requireAdmin(ctx: Ctx, ev: { adminIdentity: any }) {
   if (!ctx.sender.isEqual(ev.adminIdentity)) throw new SenderError('E_NOT_ADMIN');
 }
+
+/** Row for `(eventId, slotIndex)` via the named btree — there is no composite unique. */
+function findSlot(ctx: Ctx, eventId: bigint, slotIndex: number) {
+  for (const s of ctx.db.slot.by_event_slot.filter([eventId, slotIndex])) return s;
+  return null;
+}
+
+/**
+ * Next arrival sequence for this event. Audit only — the turn allocator MUST NOT read `seq`.
+ *
+ * Per-event and monotonic (TC-SCH-05). It exists so C1 is mechanically falsifiable: TC-INV-03
+ * randomises every `seq` before `close_slot` and asserts the outcome is unchanged, a proof that
+ * cannot run against `id`, because `id` is the PK and a draw-hash input.
+ */
+function nextSeq(ctx: Ctx, eventId: bigint): bigint {
+  let n = 0n;
+  for (const _b of ctx.db.bid.by_event_slot.filter(eventId)) n++;
+  return n + 1n;
+}
+
 
 /**
  * Seconds → a Timestamp, derived from `ctx.timestamp` and never `Date.now()` (CONTRACT §4).
@@ -335,7 +357,7 @@ export const join = spacetimedb.procedure(
 
     return ctx.withTx((tx: any) => {
       const ev = tx.db.event.id.find(eventId);
-      if (ev === undefined) throw new SenderError('E_UNKNOWN_EVENT');
+      if (ev == null) throw new SenderError('E_UNKNOWN_EVENT');
       if (ev.state === 'settled') throw new SenderError('E_EVENT_SETTLED');
 
       // Module RNG, never Math.random — the wallet draw must be replayable. Contrast the
@@ -456,7 +478,7 @@ export const openEvent = spacetimedb.reducer({ eventId: t.u64() }, (ctx, { event
  */
 function settleImpl(ctx: Ctx, eventId: bigint): void {
   const ev = ctx.db.event.id.find(eventId);
-  if (ev === undefined) return;
+  if (ev == null) return;
   if (ev.state !== 'open') return; // no-op, NOT an error
   ctx.db.event.id.update({ ...ev, state: 'settled', endTime: ctx.timestamp });
 }
@@ -472,6 +494,111 @@ export const settle = spacetimedb.reducer({ eventId: t.u64() }, (ctx, { eventId 
   requireAdmin(ctx as any, ev);
   settleImpl(ctx as any, eventId);
 });
+
+/**
+ * `submit_bid` — the single entrypoint, and the ONE place the two rounds diverge.
+ *
+ * Nothing else about the two modes is allowed to differ, or the comparison the whole demo
+ * rests on stops being valid. Both branches validate `price` against a server-known value, so
+ * the paths are structurally identical right up to the clearing rule.
+ *
+ * **Must stay a reducer, never a procedure.** Procedures open short `ctx.withTx` transactions
+ * rather than wrapping the whole call; C2's check-then-insert and the atomic allocation+debit
+ * both depend on full reducer serialization.
+ *
+ * **`slotIndex` is an explicit argument, not inferred.** Inferring `currentSlotIndex` would let
+ * a slow bot's stale submission silently land in whichever slot happens to be current when it
+ * arrives — precisely the failure `E_STALE_SLOT` exists to prevent. Queue mode passes 0.
+ *
+ * Guard order is frozen (CONTRACT §4) and MUST NOT be reordered for convenience — the code a
+ * caller receives depends entirely on which guard runs first:
+ *
+ *   E_EVENT_NOT_OPEN -> E_UNKNOWN_PARTICIPANT -> E_WRONG_EVENT -> E_ALREADY_WON
+ *     -> E_STALE_SLOT -> E_PRICE_MISMATCH -> E_INSUFFICIENT_BALANCE
+ *     -> E_SOLD_OUT / E_DUPLICATE_ENTRY
+ *
+ * Identity questions before offer questions before contention questions. C5 sits high because a
+ * winner is out of the event entirely, so their balance and the remaining inventory are moot.
+ */
+export const submitBid = spacetimedb.reducer(
+  { eventId: t.u64(), participantId: t.u64(), slotIndex: t.u32(), price: t.f64() },
+  (ctx, { eventId, participantId, slotIndex, price }) => {
+    const ev = loadEvent(ctx as any, eventId);
+    if (ev.state !== 'open') throw new SenderError('E_EVENT_NOT_OPEN');
+
+    const p = ctx.db.participant.id.find(participantId);
+    if (p == null) throw new SenderError('E_UNKNOWN_PARTICIPANT');
+    if (p.eventId !== eventId) throw new SenderError('E_WRONG_EVENT');
+    // C5 — one ticket per participant per event.
+    if (p.hasWon) throw new SenderError('E_ALREADY_WON');
+
+    if (ev.mode === 'queue') {
+      if (slotIndex !== 0) throw new SenderError('E_STALE_SLOT');
+      if (ev.ticketPrice == null || price !== ev.ticketPrice) {
+        throw new SenderError('E_PRICE_MISMATCH');
+      }
+      if (p.walletBalance < price) throw new SenderError('E_INSUFFICIENT_BALANCE');
+      if (ev.ticketsRemaining <= 0) throw new SenderError('E_SOLD_OUT');
+
+      // Allocation and debit together, in this same call. Never two calls, never a follow-up
+      // reducer, never a saga — and no reservation/hold state anywhere, because serialized
+      // reducers are exactly what makes a hold redundant (CONTRACT §5).
+      ctx.db.allocation.insert({
+        id: 0n,
+        eventId,
+        slotIndex: 0,
+        participantId,
+        pricePaid: price,
+      });
+      ctx.db.participant.id.update({
+        ...p,
+        walletBalance: p.walletBalance - price,
+        hasWon: true,
+      });
+      const remaining = ev.ticketsRemaining - 1;
+      ctx.db.event.id.update({ ...ev, ticketsRemaining: remaining });
+
+      // No `bid` row in queue mode — the allocation IS the record (CONTRACT §2).
+
+      // Sell-out settles immediately. settleImpl, NOT the exported settle: `ctx.sender` here is
+      // the buyer, so the guarded reducer would throw E_NOT_ADMIN, and because a throw rolls
+      // back the whole transaction THIS VERY PURCHASE would fail. That is the single case the
+      // settle split exists to protect, and it fails nowhere else.
+      if (remaining === 0) settleImpl(ctx as any, eventId);
+      return;
+    }
+
+    // ---- turn mode ----
+    if (slotIndex !== ev.currentSlotIndex) throw new SenderError('E_STALE_SLOT');
+
+    const slotRow = findSlot(ctx as any, eventId, slotIndex);
+    if (slotRow == null) throw new SenderError('E_STALE_SLOT');
+    // An entry is an opt-in at the posted price. There is no bid amount to choose — for anyone.
+    if (price !== slotRow.floor) throw new SenderError('E_PRICE_MISMATCH');
+    if (p.walletBalance < slotRow.floor) throw new SenderError('E_INSUFFICIENT_BALANCE');
+
+    // C2 — check-then-insert, safe ONLY because reducers run serially. There is no composite
+    // unique constraint to lean on; SpacetimeDB supports single-column unique only.
+    for (const existing of ctx.db.bid.by_event_slot.filter([eventId, slotIndex])) {
+      if (existing.participantId === participantId) throw new SenderError('E_DUPLICATE_ENTRY');
+    }
+
+    ctx.db.bid.insert({
+      id: 0n,
+      eventId,
+      slotIndex,
+      participantId,
+      price: slotRow.floor,
+      qty: 1,
+      seq: nextSeq(ctx as any, eventId),
+      state: 'pending',
+    });
+    ctx.db.slot.id.update({ ...slotRow, entriesReceived: slotRow.entriesReceived + 1 });
+    // No allocation and no debit here — the draw at close_slot decides. That deferral IS the
+    // mechanism: nothing about arrival time can influence the outcome once entry is decoupled
+    // from allocation.
+  }
+);
 
 /**
  * `close_slot` — GATE 3. Stub for now; `slot_schedule` needs the reference to compile.
