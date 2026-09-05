@@ -1,82 +1,144 @@
 #!/usr/bin/env node
-// Bot driver entry point — Gate 2: runs against the real `FairDropClient` (`clients/sdk`) over
-// `createRealBotClient` (`realClient.ts`), one connection per bot per CONTRACT.md §9. Gate 1's
-// fixture path (`createFixtureClient()`) is still exported by `fixtureClient.ts` for the unit
-// tests, which mock/stub `BotClient` directly and never touch a live connection.
+// Bot driver entry point — queue mode.
 //
-// Usage: node --experimental-strip-types src/index.ts <humanCount> [eventId] [dbName]
-//   <humanCount>  drives bot count via computeBotCount (BOT_RATIO = 4) — never hardcode 40.
+// Usage: node --experimental-strip-types src/index.ts <humanCount|auto> [eventId] [dbName]
+//
+//   <humanCount>  a number: join exactly `humanCount x BOT_RATIO` bots, once, and stop. This is
+//                 the original behaviour and what `scripts/rehearse-*.sh` and
+//                 `manual-walkthrough.md` still pass.
+//   auto          derive the bot count from the LIVE human count and keep topping up as people
+//                 join, until the admin locks inventory. See "Auto mode" below.
 //   [eventId]     defaults to 1 (fairdrop-scratch's smoke-test event).
 //   [dbName]      defaults to fairdrop-scratch — never point this at fairdrop-demo casually.
+//
+// Connections come from a bounded pool (`pool.ts`, LLD §5a), not one per bot. At 40 bots the
+// difference was cosmetic; at 25-100 real humans it is 100-400 bots, and one socket each stops
+// being viable.
+//
+// ## Auto mode
+//
+// The number a human operator has to type is the one thing that cannot be right: people trickle
+// in over minutes, so any count typed up front is stale before it is entered. Auto mode reads it
+// off the `participant` table instead and reconciles toward `BOT_RATIO x humans`.
+//
+// It is a RECONCILING loop, not an event-driven one — it computes a deficit from the current
+// count rather than reacting to each join. A missed callback, a bot whose join failed, or a
+// restart all self-correct on the next tick; a fire-and-forget "spawn 4 on join" hook has no
+// repair path and would drift silently to the wrong ratio.
+//
+// Topping up STOPS when the event leaves `created`. Inventory is derived from the headcount at
+// `start_countdown` and never again (CONTRACT §6), so a bot joining after the lock inflates the
+// field without inflating supply — quietly shifting everyone's odds. A human who wanders in
+// late still plays; they just do not get four bots behind them.
 
-import { computeBotCount } from "./config.ts";
+import { BOT_RATIO, computeBotCount } from "./config.ts";
 import { runQueueBots } from "./runner.ts";
-import { createRealBotClient } from "./realClient.ts";
+import { createPool, pooledBotClients, POOL_SIZE } from "./pool.ts";
+import type { BotClient } from "./runner.ts";
 
-const SERVER_URI = "http://127.0.0.1:3000";
+const SERVER_URI = process.env.FAIRDROP_URI ?? "http://127.0.0.1:3000";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function main() {
-  const humanCount = Number(process.argv[2] ?? "10");
+  const humanArg = process.argv[2] ?? "10";
+  const auto = humanArg.toLowerCase() === "auto";
   const eventId = BigInt(process.argv[3] ?? "1");
   const dbName = process.argv[4] ?? "fairdrop-scratch";
 
-  const botCount = computeBotCount(humanCount);
-  console.log(`humans=${humanCount} -> bots=${botCount} (ratio derived, not hardcoded)`);
+  const pool = await createPool(SERVER_URI, dbName, POOL_SIZE);
+  console.log(`pool=${pool.size} connections — sized to cores, never to bot count (LLD §5a)`);
   console.log(`pid=${process.pid} — one process regardless of bot count`);
 
-  // The ticket price is read from the live event row, never assumed by the driver — a bot
-  // that guessed the price could pass CONTRACT.md §5's price check by coincidence and mask a
-  // real mismatch elsewhere. `connect()`'s `subscribeToAllTables` call doesn't hand back a
-  // ready signal, so poll the cache briefly for the row to arrive.
-  const probe = await createRealBotClient(SERVER_URI, dbName);
+  // The ticket price is read from the live event row, never assumed — a bot that guessed the
+  // price could satisfy CONTRACT §5's check by coincidence and mask a real mismatch elsewhere.
+  const control = pool.next();
+  const deadline = Date.now() + 10_000;
   let eventRow;
-  const probeDeadline = Date.now() + 10_000;
-  while ((eventRow = probe.client.listEvents().find((e) => e.id === eventId)) == null) {
-    if (Date.now() > probeDeadline) {
+  while ((eventRow = control.listEvents().find((e) => e.id === eventId)) == null) {
+    if (Date.now() > deadline) {
       throw new Error(`event ${eventId} not found on ${dbName} after 10s — create it first`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await sleep(50);
   }
   const ticketPrice = eventRow.ticketPrice;
   if (ticketPrice == null) {
-    throw new Error(`event ${eventId} has no ticketPrice — is it turn mode? this driver is queue-only`);
+    throw new Error(`event ${eventId} has no ticketPrice — is it turn mode? use turn.ts`);
   }
-  probe.client.disconnect();
 
-  // Track every per-bot connection so this script can close them all and actually exit —
-  // an open WebSocket keeps Node's event loop alive indefinitely otherwise (CONTRACT.md §9:
-  // "40 bots get one connection each," so there are up to 40 sockets to close here).
-  const connections: import("../../sdk/FairDropClient.ts").FairDropClient[] = [];
-  const start = Date.now();
-  // Per-bot timing instrumentation. The bid delay a bot ACTUALLY achieves is not `DELTA_MS` —
-  // it is DELTA_MS plus however long this process took to notice `state == "open"` on that
-  // bot's own socket. That second term is invisible from the outside and, if it dominates, the
-  // Round 1 result stops measuring FCFS and starts measuring the demo rig. Recorded here so a
-  // rehearsal can see it (DEMO-RECIPE failure playbook: "check ... the bots aren't throttled").
+  // Per-bot timing instrumentation. The delay a bot ACTUALLY achieves is DELTA_MS plus however
+  // long this process took to notice `state == "open"` on its own socket. That second term is
+  // invisible from outside and, if it dominates, Round 1 stops measuring FCFS and starts
+  // measuring the demo rig (DEMO-RECIPE failure playbook).
   const openedAt: number[] = [];
   const bidAt: number[] = [];
-  await runQueueBots(
-    async () => {
-      const { client, botClient } = await createRealBotClient(SERVER_URI, dbName);
-      connections.push(client);
-      const waitForOpen = botClient.waitForOpen!.bind(botClient);
-      return {
-        ...botClient,
-        async waitForOpen(id: bigint) {
-          await waitForOpen(id);
-          openedAt.push(Date.now());
-        },
-        submitBid(...args: Parameters<typeof botClient.submitBid>) {
-          bidAt.push(Date.now());
-          return botClient.submitBid(...args);
-        },
-      };
-    },
-    { eventId, ticketPrice, count: botCount }
-  );
-  const pct = (xs: number[], base: number, q: number) => {
+  const base = pooledBotClients(pool);
+  const instrumented = async (): Promise<BotClient> => {
+    const botClient = await base();
+    const waitForOpen = botClient.waitForOpen!.bind(botClient);
+    return {
+      ...botClient,
+      async waitForOpen(id: bigint) {
+        await waitForOpen(id);
+        openedAt.push(Date.now());
+      },
+      submitBid(...args: Parameters<typeof botClient.submitBid>) {
+        bidAt.push(Date.now());
+        return botClient.submitBid(...args);
+      },
+    };
+  };
+
+  const start = Date.now();
+  const inFlight: Array<Promise<void>> = [];
+  let spawned = 0;
+
+  const spawn = (count: number) => {
+    if (count <= 0) return;
+    spawned += count;
+    inFlight.push(runQueueBots(instrumented, { eventId, ticketPrice, count }));
+  };
+
+  if (auto) {
+    const orphans = control.listParticipants(eventId).filter((p) => p.origin === "bot").length;
+    if (orphans > 0) {
+      console.warn(
+        `WARNING: ${orphans} bot row(s) already exist on event ${eventId} from an earlier run. ` +
+          `They are orphans — nothing is driving them and they will not bid. They are NOT counted ` +
+          `toward the ratio, so the visible bot count will read high. Use a fresh event.`
+      );
+    }
+    console.log(`auto mode — holding bots at ${BOT_RATIO}x the live human count until lock`);
+
+    for (;;) {
+      const ev = control.listEvents().find((e) => e.id === eventId);
+      if (ev == null) break;
+      if (ev.state !== "created") {
+        console.log(`event is ${ev.state} — topping up stops here, ${spawned} bots live`);
+        break;
+      }
+      const humans = control.listParticipants(eventId).filter((p) => p.origin === "human").length;
+      const want = computeBotCount(humans);
+      if (want > spawned) {
+        console.log(`humans=${humans} -> want=${want} bots, spawning ${want - spawned}`);
+        spawn(want - spawned);
+      }
+      await sleep(250);
+    }
+  } else {
+    const humanCount = Number(humanArg);
+    const botCount = computeBotCount(humanCount);
+    console.log(`humans=${humanCount} -> bots=${botCount} (ratio derived, not hardcoded)`);
+    spawn(botCount);
+  }
+
+  await Promise.all(inFlight);
+
+  const pct = (xs: number[], from: number, q: number) => {
     const s = [...xs].sort((a, b) => a - b);
-    return s.length === 0 ? NaN : Math.round(s[Math.floor((s.length - 1) * q)] - base);
+    return s.length === 0 ? NaN : Math.round(s[Math.floor((s.length - 1) * q)] - from);
   };
   const firstOpen = Math.min(...openedAt);
   console.log(
@@ -87,11 +149,13 @@ async function main() {
     `bid submitted (ms after the first open detection): ` +
       `p50=${pct(bidAt, firstOpen, 0.5)} p90=${pct(bidAt, firstOpen, 0.9)} max=${pct(bidAt, firstOpen, 1)}`
   );
-  // Give the last submitBid calls a moment to reach the module before disconnecting —
-  // submitBid is fire-and-forget from this client's point of view.
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  console.log(`${botCount} bots joined and bid in ${Date.now() - start}ms, one process, pid=${process.pid}`);
-  for (const c of connections) c.disconnect();
+  // submitBid is fire-and-forget from this client's point of view — let the last calls land.
+  await sleep(500);
+  console.log(
+    `${spawned} bots joined and bid in ${Date.now() - start}ms over ${pool.size} connections, ` +
+      `one process, pid=${process.pid}`
+  );
+  pool.closeAll();
 }
 
 main().catch((err) => {
