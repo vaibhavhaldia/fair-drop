@@ -1,0 +1,16 @@
+{
+  "name": "fair-drop-sdk",
+  "version": "1.0.0",
+  "description": "One thin wrapper around SpacetimeDB's generated TS client (docs/CONTRACT.md §3). Nothing outside this package talks to `generated/` directly.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "spacetimedb": "2.10.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  }
+}

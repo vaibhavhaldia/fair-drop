@@ -63,7 +63,7 @@ Legend: **A**rrange · **A**ct · **C**heck.
 
 - [ ] `spacetime start` running, database published, `spacetime logs --server local fairdrop-demo` open in a third terminal
 - [ ] Display open on the projector, **font size checked from the back of the room**
-- [ ] Bot script ready, count set to **4 × H** (40 at the target H = 10) — the 4:1 ratio is what the Round 2 claim rests on
+- [ ] Bot script ready, count set to **4 × H** (40 at the target H = 10) — the 4:1 ratio is what the Round 2 claim rests on. Queue mode is `clients/bots/src/index.ts`, turn mode is `clients/bots/src/turn.ts` — they are **different entry points**, and `index.ts` will not drive Round 2
 - [ ] `spacetime sql` terminal open for live verification — the audience seeing you query raw state is the *point*
 - [ ] Laptop on mains power, screen sleep disabled, notifications silenced
 
@@ -137,6 +137,24 @@ this number, not against an abstraction — and if you don't record it live, the
 only your word for it.
 
 **If bots do NOT dominate**, something is wrong with the *demo*, not the code: check `DELTA_MS` is 500 and the bots aren't throttled. Round 1 must look unfair.
+
+> ### ⚠ In rehearsal, check who is playing the humans before you check anything else
+>
+> The first rehearsal of this recipe came out **10 humans / 10 bots** — Round 1 did not look
+> unfair at all — and nothing was wrong with the module or the bots. The humans were being
+> driven from a shell by `spacetime call`, which lands in **19ms** against a local instance,
+> while the bots were correctly waiting `U(0, 500ms)`. The rehearsal rig was simply 13x faster
+> than the field it was supposed to be losing to.
+>
+> Measured the same run: bots detected `open` within 21ms of each other and their bids spread
+> p50=290ms / max=510ms — exactly the intended distribution. The bots were never the problem,
+> and every instinct to go looking at `DELTA_MS` first would have been wasted.
+>
+> `scripts/rehearse-round1.sh` therefore lags operator-issued human bids by `HUMAN_LAG_MS`
+> (default 1500ms), the only number in the rehearsal that models rather than measures. Setting
+> it to 0 does not make Round 1 more realistic — it makes the humans robots, and it inverts the
+> finding the round exists to show. **On stage this does not arise**: real people tap a phone
+> after watching the display flip, which is seconds, not milliseconds.
 
 🎤 **Say the δ number out loud** — it is the strongest line in Round 1: *"These bots aren't superhuman. Each one waits a random amount of time — anywhere from instant to half a second, a quarter second on average. That's about as fast as a person can possibly tap a screen. They still took everything, because there are forty of them. You don't need to be fast to win first-come-first-served. You need to be reliably fast enough, at scale."*
 
@@ -250,11 +268,28 @@ authoritative and checkable; patching it live forfeits the argument.
 Run this twice clean before stage. Not a formality — the second run is where reuse-of-state
 bugs surface.
 
-| Run | Time | H | R1 human wins | R2 human wins | Expected (`0.4H`) | Failures | Notes |
+| Run | Time (UTC) | H | R1 human wins | R2 human wins | Expected (`0.4H`) | Failures | Notes |
 |---|---|---|---|---|---|---|---|
-| 1 | | | | | | | |
-| 2 | | | | | | | |
-| Stage | | | | | | | |
+| 1 | 2026-09-05 21:02Z | 10 | **0** of 20 | **3** of 20 | 4 | none | `fairdrop-scratch`; entries/slot 50,45,35,31,25 |
+| 2 | 2026-09-05 21:09Z | 10 | **0** of 20 | **3** of 20 | 4 | none | back to back with run 1, nothing touched between |
+| Stage | 2026-09-05 21:18Z | 10 | **0** of 20 | **4** of 20 | 4 | none | `fairdrop-demo`, the real rig; entries/slot 50,43,35,30,21 |
+
+Both runs above were driven by `./scripts/rehearse.sh` (Stage 1 + Stage 2) with Stage 0 run
+**once**, before run 1, and nothing repaired between the two — which is the ship criterion, and
+the reason Stage 0 is deliberately *not* called from `rehearse.sh`: it publishes with
+`--delete-data=always` and would have destroyed run 1's evidence on its way into run 2.
+Stage 3 then reproduced all five `drawSeed`s and winner sets of run 2's turn event exactly
+(`./scripts/rehearse-stage3.sh <eventId>`).
+
+The **Stage** row is the same recipe run once against `fairdrop-demo` itself — Stage 0 (9
+checks), Round 1 (13), Round 2 (13), then Stage 3 (6) reproducing all five `drawSeed`s and
+winner sets from the settled event. 41 checks, no failures, 5m07s end to end.
+
+R2 landing on 3 in the two scratch runs, against an expected 4, is inside the variance the §2.3
+note describes (`0.4H` winners out of `2H` tickets); it landed there on both runs independently,
+and on the demo rig it landed on 4 exactly. Three runs, three different populations, R1 human
+wins of 0 every time — that number is the one the Round 2 claim is compared against, and it has
+not moved.
 
 Log **counts**, not just shares — a share hides the denominator, and the denominator (`H`) is
 the thing most likely to drift between rehearsal and stage.

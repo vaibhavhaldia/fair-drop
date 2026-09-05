@@ -1,0 +1,32 @@
+{
+  "event": {
+    "id": "1",
+    "mode": "turn",
+    "state": "open",
+    "totalTickets": 20,
+    "ticketsRemaining": 4,
+    "participantsAtOpen": 50,
+    "ticketPrice": null
+  },
+  "participants": [
+    { "id": "1", "eventId": "1", "origin": "human" },
+    { "id": "2", "eventId": "1", "origin": "human" },
+    { "id": "3", "eventId": "1", "origin": "bot" },
+    { "id": "4", "eventId": "1", "origin": "bot" },
+    { "id": "5", "eventId": "1", "origin": "bot" }
+  ],
+  "allocations": [
+    { "eventId": "1", "participantId": "1", "slotIndex": 0, "pricePaid": 25000 },
+    { "eventId": "1", "participantId": "3", "slotIndex": 0, "pricePaid": 25000 },
+    { "eventId": "1", "participantId": "4", "slotIndex": 0, "pricePaid": 25000 },
+    { "eventId": "1", "participantId": "2", "slotIndex": 1, "pricePaid": 30000 },
+    { "eventId": "1", "participantId": "5", "slotIndex": 1, "pricePaid": 30000 }
+  ],
+  "slots": [
+    { "eventId": "1", "slotIndex": 0, "floor": 25000, "effectiveQuota": 4, "entriesReceived": 46, "filled": 4 },
+    { "eventId": "1", "slotIndex": 1, "floor": 30000, "effectiveQuota": 4, "entriesReceived": 41, "filled": 4 },
+    { "eventId": "1", "slotIndex": 2, "floor": 40000, "effectiveQuota": 4, "entriesReceived": 34, "filled": 0 },
+    { "eventId": "1", "slotIndex": 3, "floor": 48000, "effectiveQuota": 4, "entriesReceived": 28, "filled": 0 },
+    { "eventId": "1", "slotIndex": 4, "floor": 55000, "effectiveQuota": 4, "entriesReceived": 22, "filled": 0 }
+  ]
+}

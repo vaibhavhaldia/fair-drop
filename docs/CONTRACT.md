@@ -219,6 +219,17 @@ the previous version of this table listed codes an operator could never see. Ver
 The guard is kept in code as defence-in-depth — it is the only one that stays correct if the
 other two are ever reordered — but do not wait for its code in a log. It will not come.
 
+**`E_SOLD_OUT` never fires on the sell-out path** — verified live 2026-09-06. The last sale
+calls `settleImpl` inside the same `submit_bid` transaction, so by the time the next bid arrives
+`state == "settled"` and `E_EVENT_NOT_OPEN` (first in the guard order) answers instead. The only
+way to see `E_SOLD_OUT` is an event that *opens* with zero inventory: `size_inventory` guards
+`participants == 0` but not `totalTickets == 0`, and `round(0.40 x 1) == 0`, so a one-participant
+queue event reaches `open` with `ticketsRemaining == 0` and every bid returns `E_SOLD_OUT`.
+
+Reachable, then, but never for the reason its name suggests. Do not debug a sell-out by looking
+for this code, and do not delete the guard: it is the only thing standing between a
+zero-inventory event and a silent no-op.
+
 **Guard order is frozen**, because the code returned depends entirely on which guard runs first:
 
 ```
@@ -295,8 +306,12 @@ baseQuota[i] := base + (i < remainder ? 1 : 0)
   `base = 0`, and slots 0–3 get zero while slot 4 takes all four — the whole event sells at the
   top floor where most wallets don't qualify. Identical whenever the division is exact
   (every demo-scale number), strictly better otherwise.
-- **Zero participants → `E_NO_PARTICIPANTS`.** Resolves the escalation `saksham.md` flags at
-  Gate 2. Allowing it yields a dead event on a projector with no explanation.
+- **Zero *tickets* → `E_NO_PARTICIPANTS`.** Resolves the escalation `saksham.md` flags at
+  Gate 2. Allowing it yields a dead event on a projector with no explanation. The guard keys on
+  `totalTickets == 0`, not on the participant count: `round(0.40 x 1)` is 0, so checking only
+  for zero participants let a one-participant event open with no inventory and answer
+  `E_SOLD_OUT` to every bid (TC-EVT-12, fixed 2026-09-06). A small enough fraction rounds any
+  population down, so a participant floor would not have covered it either.
 - **The headcount is per-event.** Unqualified `count(Participant)` would size the second event
   in `test:core` off both populations — silently, and undetectably in any single-event test.
 - **`participantsAtOpen` is a snapshot** (taken at countdown, despite the name, which stays

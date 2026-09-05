@@ -1,0 +1,21 @@
+{
+  "event": {
+    "id": "2",
+    "mode": "queue",
+    "state": "settled",
+    "totalTickets": 20,
+    "ticketsRemaining": 0,
+    "participantsAtOpen": 50,
+    "ticketPrice": 15000
+  },
+  "participants": [
+    { "id": "1", "eventId": "2", "origin": "human" },
+    { "id": "2", "eventId": "2", "origin": "bot" },
+    { "id": "3", "eventId": "2", "origin": "bot" }
+  ],
+  "allocations": [
+    { "eventId": "2", "participantId": "2", "slotIndex": 0, "pricePaid": 15000 },
+    { "eventId": "2", "participantId": "3", "slotIndex": 0, "pricePaid": 15000 }
+  ],
+  "slots": []
+}
