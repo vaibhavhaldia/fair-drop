@@ -105,8 +105,10 @@ for it. The last sale calls `settleImpl` in the same transaction, so the state i
 `settled` when the next bid arrives and `E_EVENT_NOT_OPEN` answers first. Verified: on a
 4-ticket event, participants 48 and 49 both got `E_EVENT_NOT_OPEN`.
 
-To actually see it, open an event with **zero inventory** — `size_inventory` guards
-`participants == 0` but not `totalTickets == 0`, and `round(0.40 x 1) == 0`:
+It is now reachable only through a deliberately malformed call, because the zero-inventory
+route was closed on 2026-09-06 (TC-EVT-12). Before that fix, `size_inventory` guarded
+`participants == 0` but not `totalTickets == 0`, and `round(0.40 x 1) == 0`, so this sequence
+opened a dead event:
 
 ```bash
 EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]')
@@ -116,10 +118,9 @@ spacetime call --server local $DB open_event "$EV"
 spacetime call --server local $DB submit_bid "$EV" "$PID" '0' '15000'   # -> E_SOLD_OUT
 ```
 
-That path is worth knowing for a second reason: a one-participant queue event reaches `open`
-looking completely normal and is dead on arrival. `DEMO-RECIPE` tops up to H >= 8, so it should
-not bite on stage — but it is the same "dead event on a projector with no explanation" that the
-`E_NO_PARTICIPANTS` guard exists to prevent, one rounding step further along.
+`start_countdown` now returns `E_NO_PARTICIPANTS` at the third line and the event stays in
+`created`, so the recovery is to add participants and call it again — which is exactly what
+`DEMO-RECIPE`'s failure playbook already told the operator to expect.
 
 ---
 

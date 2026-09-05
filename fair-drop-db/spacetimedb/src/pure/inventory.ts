@@ -47,6 +47,15 @@ export function sizeInventory(
 
   const totalTickets = Math.round(ticketFraction * participants);
 
+  // The participants check above is NOT enough, and the difference shipped: `round(0.40 × 1)`
+  // is 0, so a one-participant queue event cleared every guard, reached `open` looking entirely
+  // normal, and answered E_SOLD_OUT to every bid — the dead-event-on-a-projector case that
+  // E_NO_PARTICIPANTS exists to prevent, one rounding step further along. DEMO-RECIPE's failure
+  // playbook already promised this guard ("`totalTickets == 0` → E_NO_PARTICIPANTS should have
+  // blocked it"). Key it on the ticket count, not on a participant floor: a small enough
+  // fraction rounds any population down to zero (TC-EVT-12).
+  if (totalTickets === 0) throw new InventoryError('E_NO_PARTICIPANTS');
+
   // Queue mode has no slots, and `floor(totalTickets / 0)` is `Infinity` rather than a throw —
   // it would propagate silently into every quota. The whole per-slot split is skipped instead.
   if (slotCount === 0) return { totalTickets, baseQuota: [] };

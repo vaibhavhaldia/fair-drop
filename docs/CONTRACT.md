@@ -306,8 +306,12 @@ baseQuota[i] := base + (i < remainder ? 1 : 0)
   `base = 0`, and slots 0–3 get zero while slot 4 takes all four — the whole event sells at the
   top floor where most wallets don't qualify. Identical whenever the division is exact
   (every demo-scale number), strictly better otherwise.
-- **Zero participants → `E_NO_PARTICIPANTS`.** Resolves the escalation `saksham.md` flags at
-  Gate 2. Allowing it yields a dead event on a projector with no explanation.
+- **Zero *tickets* → `E_NO_PARTICIPANTS`.** Resolves the escalation `saksham.md` flags at
+  Gate 2. Allowing it yields a dead event on a projector with no explanation. The guard keys on
+  `totalTickets == 0`, not on the participant count: `round(0.40 x 1)` is 0, so checking only
+  for zero participants let a one-participant event open with no inventory and answer
+  `E_SOLD_OUT` to every bid (TC-EVT-12, fixed 2026-09-06). A small enough fraction rounds any
+  population down, so a participant floor would not have covered it either.
 - **The headcount is per-event.** Unqualified `count(Participant)` would size the second event
   in `test:core` off both populations — silently, and undetectably in any single-event test.
 - **`participantsAtOpen` is a snapshot** (taken at countdown, despite the name, which stays
