@@ -93,7 +93,7 @@ primary key. There are **no composite unique constraints** — SpacetimeDB suppo
 | `participant` | `id` | PK — **not** `identity` |
 | | `eventId` | registration is **per event**; C5 is per-event by construction |
 | | `identity` | indexed, **not unique** — one pooled connection backs many rows |
-| | `handle` | **UNIQUE**, `displayName + "-" + randomSuffix`. Makes TC-POOL-07 a schema guarantee |
+| | `handle` | **UNIQUE**, `eventId + "-" + displayName + "-" + suffix32`. Makes TC-POOL-07 a schema guarantee. The `eventId` prefix and the 32-bit suffix are both deliberate: uniqueness is enforced **globally**, across every event the instance has ever held, while participants are per-event — so at a 16-bit suffix the birthday space was every row ever written, not this event's headcount (~1% per rehearsal at 40 bots sharing a name, compounding across rehearsals that do not wipe). Prefixing confines a collision to one event and one display name |
 | | `displayName` | as typed, **not unique** — live audiences collide on names |
 | | `initialBalance` | immutable; the reconciliation anchor (§5) |
 | `bid` | `slotIndex` | **turn mode only** — queue mode writes no `bid` rows at all |
@@ -204,7 +204,20 @@ the whole transaction, **the last ticket purchase fails**. `close_slot` and `sub
 | `start_countdown` | `E_NOT_ADMIN` · `E_WRONG_STATE` · `E_NO_PARTICIPANTS` |
 | `join` | `E_EVENT_SETTLED` · `E_HANDLE_COLLISION` *(retryable — pool regenerates the suffix)* |
 | `submit_bid` | `E_EVENT_NOT_OPEN` · `E_UNKNOWN_PARTICIPANT` · `E_WRONG_EVENT` · `E_ALREADY_WON` · `E_STALE_SLOT` · `E_PRICE_MISMATCH` · `E_INSUFFICIENT_BALANCE` · `E_SOLD_OUT` · `E_DUPLICATE_ENTRY` |
-| `close_slot` | `E_WRONG_STATE` · `E_SLOT_ALREADY_CLOSED` |
+| `close_slot` | **throws nothing.** Scheduled reducers have no caller to receive an error, so every guard is a silent `return` that `console.info`s its code. `E_WRONG_STATE` and `E_STALE_TIMER` are observable in `spacetime logs`; `E_SLOT_ALREADY_CLOSED` is **unreachable** (below) |
+
+**`close_slot` returns, it does not throw — and that distinction is now written down** because
+the previous version of this table listed codes an operator could never see. Verified live
+2026-09-06:
+
+| Code | Reachable? | How it shows up |
+|---|---|---|
+| `E_WRONG_STATE` | ✅ | `close_slot: E_WRONG_STATE event=1 state=created mode=queue` |
+| `E_STALE_TIMER` | ✅ | `close_slot: E_STALE_TIMER event=2 timerSlot=5 currentSlot=0` |
+| `E_SLOT_ALREADY_CLOSED` | ❌ **never** | closing a non-last slot twice trips `E_STALE_TIMER` first (`currentSlotIndex` has advanced); closing the last slot twice trips `E_WRONG_STATE` first (the event has settled). No state exists where a `slot_result` exists for the *current* slot of an *open* event |
+
+The guard is kept in code as defence-in-depth — it is the only one that stays correct if the
+other two are ever reordered — but do not wait for its code in a log. It will not come.
 
 **Guard order is frozen**, because the code returned depends entirely on which guard runs first:
 
@@ -326,8 +339,33 @@ actually fails if the mechanism breaks.
 | C1 | Allocation independent of arrival order | `drawSeed` derived from `(eventId, slotIndex, sorted(entry ids))`; ranking by `digest64(drawSeed, entry.id)`. `seq` and insertion order never read for ordering | **TC-INV-01** (shuffled array → identical allocations) + **TC-CLR-11** (χ² uniformity). Both are needed: INV-01 cannot see id-correlated bias, CLR-11 cannot see a direct read of `seq` |
 | C2 | ≤1 entry per participant per slot | check-then-insert in `submit_bid`; safe **only** because reducers serialize. No schema constraint exists | ⚠️ **no automated test** — reducers are not unit-testable. Verified by CLI: a second `submit_bid` for the same `(participant, slot)` returns `E_DUPLICATE_ENTRY` |
 | C3 | All clients act on one committed state | single serialized `slot_result` write per slot | ⚠️ **no automated test** — needs multiple live clients. Structural: one write per close, inside the closing transaction |
-| C4 | No client acts before commit | seed derives from data that exists only at close — unpredictable in advance | ⚠️ **no automated test.** Structural, and the structure is checked: **TC-CLR-14** (no `ctx.random` in the clearing path) is what keeps the seed a function of committed state |
-| C5 | ≤1 ticket per participant per event | `participant.hasWon`, checked in `submit_bid` and again in `close_slot`; per-event by construction via `participant.eventId` | ⚠️ **no automated test.** Verified by CLI: a repeat buy returns `E_ALREADY_WON`; `close_slot`'s re-check is defence-in-depth that should never fire |
+| C4 | No client acts before commit | seed derives from data that exists only at close — unpredictable in advance **to a passive observer**. NOT unpredictable to an adversary who chooses their own entries; see "the grinding case" below | ⚠️ **no automated test.** Structural, and the structure is checked: **TC-CLR-14** (no `ctx.random` in the clearing path) is what keeps the seed a function of committed state |
+| C5 | ≤1 ticket per **participant row** per event | `participant.hasWon`, checked in `submit_bid` and again in `close_slot`; per-event by construction via `participant.eventId` | ⚠️ **no automated test.** Verified by CLI: a repeat buy returns `E_ALREADY_WON`; `close_slot`'s re-check is defence-in-depth that should never fire |
+
+**C5 is a property of rows, not of people.** `participant.identity` is deliberately non-unique
+(§2, and it is what lets one pooled connection back forty bots), and C2 only blocks a duplicate
+`participantId` within a slot. So one identity holding *k* participant rows can win *k* tickets,
+legitimately, through the front door. That is the intended demo shape — the bots are the point —
+but "≤1 ticket per participant" must not be read on stage as "≤1 ticket per human". Nothing in
+the module makes the stronger claim, and nothing should be said that implies it.
+
+**The grinding case — C4's actual boundary.** The draw seed is a pure function of
+`(eventId, slotIndex, sorted(entry ids))`, all of it public in `bid`, and the slot window is 60s.
+An adversary holding several participant rows can therefore, at t-1s: enumerate the subsets of
+*their own* entries they could still submit, compute the resulting seed and ranking for each,
+and submit the subset that ranks one of their rows first. Determinism is what makes the draw
+verifiable, and it is the same property that makes it grindable by whoever moves last.
+
+This does **not** break the demo and is not a reason to add an RNG — an RNG-seeded draw would
+kill verifiability (TC-CLR-14) to fix a threat the demo does not face. It is recorded because
+§7 previously said "unpredictable in advance" without qualification, and that sentence is only
+true against an observer who does not get to choose their own entries. The honest claim is:
+**no participant can influence the draw by arriving earlier or later** (C1, tested), and
+**nobody can predict it before the entries exist** (C4). Neither of those is "the draw is
+unmanipulable by a sybil who submits last", and the demo should not claim it is.
+
+A commit-reveal entry phase closes it. That is out of scope at 4h and is the right fix if this
+ever stops being a demo.
 
 Three of the five invariants have **no automated test**, and that is a fact about the platform,
 not a decision — `spacetimedb/server` cannot be loaded in vitest (§1). Do not read the empty
@@ -402,7 +440,7 @@ docs-derived**. No open questions remain from this list.
 | `scheduled: (): any => reducerRef` on the **table** | ✅ compiles and registers |
 | Multi-column btree via `indexes: [{accessor, algorithm, columns}]` | ✅ compiles |
 | `t.identity().index('btree')` non-unique | ✅ **three participants created from one identity** — Blocker A's fix works in practice |
-| `t.string().unique()` on `handle` | ✅ duplicate insert **throws and rolls back** — the row does not land, so `E_HANDLE_COLLISION` is a real, catchable path |
+| `t.string().unique()` on `handle` | ✅ duplicate insert **throws and rolls back** — the row does not land. But the error raised is the **host's constraint violation, not `E_HANDLE_COLLISION`**, so `join` check-then-inserts against `db.participant.handle.find()` and throws the documented code itself (verified 2026-09-06 by pinning the suffix and joining twice: `E_HANDLE_COLLISION`, one row) |
 | **Procedures return values to the caller** | ✅ `join_proc` returned `[1.0, 69565.0]` — the id and wallet. **The §3 fallback is NOT needed** |
 | `ctx.random.integerInRange(20_000, 150_000)` | ✅ distinct integers in range: 69565 / 147207 / 101813 |
 | `ctx.withTx(tx => ...)` inside a procedure | ✅ insert + return in one transaction |
@@ -481,6 +519,14 @@ Specifically frozen against silent revision:
 - **the draw hash's avalanche requirement** (raw FNV-1a shipped and violated C1 silently; the
   finalizer looks like removable complexity and is not — §7, TC-CLR-11)
 - **TC-CLR-11 itself** (cut once as redundant with TC-INV-01; it is not, and the cut shipped a bug)
+- **TC-CLR-09b / `tests/verifier-parity.unit.test.ts`** (looks redundant with TC-CLR-09 and is
+  the opposite: TC-CLR-09 imports the module, so only this one can catch the verifier drifting
+  away from `hash.ts`. Delete it and TC-CLR-09's claim silently becomes self-consistency again)
+- **the check-then-insert on `handle` in `join`** (looks redundant with the `unique` constraint;
+  the constraint raises the host's error, not `E_HANDLE_COLLISION`, so removing it un-documents
+  the code that §9 promises and the bot pool retries on)
+- **`smoke.sh`'s refusal to publish over a live event** (looks like friction; it is the only
+  thing standing between a mid-demo rig check and deleting the event on the projector)
 
 If a test seems to require breaking one of these, the test is wrong or the need is an
 escalation — not a reason to edit this file.

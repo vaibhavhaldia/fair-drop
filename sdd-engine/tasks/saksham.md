@@ -33,12 +33,13 @@ Therefore:
 - Everything else is verified by **running it** — `spacetime call`, `spacetime sql`, and the
   demo itself. Do not spend time building test scaffolding for reducers.
 
-**Write exactly three tests.** Not three suites — three tests:
+**Write exactly four tests.** Not four suites — four tests:
 
 | Test | Why this one |
 |---|---|
 | TC-INV-01 | Shuffle insertion order ≥100 ways over ≥20 entries → identical `Allocation` rows. Pure, milliseconds, no server. **This is the thesis.** |
 | TC-CLR-09 | Recompute the draw outside the module from `drawSeed` + committed entries → exact match. ~10 lines once the draw is pure, and it is the whole differentiator over FCFS. |
+| TC-CLR-09b | The *standalone* verifier (`integration/verify/recompute.mjs`) agrees with the module. **Added 2026-09-06.** TC-CLR-09 as first written imported the module's own draw, so it proved only that the module agreed with itself — the exact failure `recompute.mjs`'s own header warns about. This one shells out to the script. |
 | TC-CLR-11 | χ² over win rates across 500 synthetic slots. **Restored 2026-09-05 after cutting it shipped a real bug** — see below. |
 
 If you find yourself writing a fourth, stop and ask whether it beats spending the time on a

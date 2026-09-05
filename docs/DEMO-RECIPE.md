@@ -20,15 +20,27 @@ Legend: **A**rrange · **A**ct · **C**heck.
 | **A** | `spacetime --version` → must read **2.10.0**, matching `spacetimedb@2.10.0` in `package.json`. It is `current`, so this normally just passes; if it reads anything else, `spacetime version use 2.10.0`. CLI and lib are pinned to the same version on purpose — CONTRACT §1 |
 | **A** | `spacetime start` in its own terminal — leave it running, it is the demo |
 | **Act** | `./scripts/smoke.sh` |
-| **C** ✅ | Prints **Stage 0 passed — 7 checks**. **If it fails, stop — nothing downstream matters.** |
+| **C** ✅ | Prints **Stage 0 passed — 9 checks**. **If it fails, stop — nothing downstream matters.** |
 
 > **Stage 0 is a script, not a checklist, and that is deliberate.** It used to be four commands
 > in this table; when the scaffold was deleted at Gate 1 it went on describing `add` and
 > `person`, neither of which existed any more, and nothing noticed — prose that rots stays
 > confident, a script that rots *fails*. `scripts/smoke.sh` checks the CLI pin, that the
-> instance is actually up, the publish, the procedure return path, the row landing, the pure
-> tests, and — the one nothing else covers — that `recompute.mjs` still agrees with the
-> module's own hash. Drift there silently voids TC-CLR-09 while every test stays green.
+> instance is actually up, that `$DB` holds no live event it is about to destroy, the publish,
+> the procedure return path, the row landing, the pure tests, that `recompute.mjs` still agrees
+> with the module's own hash, and that `close_slot` is still private to non-owners.
+>
+> **It refuses to run if `$DB` holds a live or completed event.** Stage 0 publishes with
+> `--delete-data=always`; running it to "just check the rig" mid-demo would delete the event on
+> the projector, and a settled event is the evidence Stage 3 recomputes from. Use
+> `DB=fairdrop-scratch ./scripts/smoke.sh` to check the rig without touching the demo, or
+> `FORCE=1` to wipe on purpose.
+>
+> **The verifier cross-check fails, it never skips.** It used to print a note and pass when
+> `node --experimental-strip-types` was unavailable — which silently removed the only guard on
+> TC-CLR-09 and pointed you at `npm test`, a suite that at the time could not catch the drift
+> at all because every test in it imported the module's own hash. `npm test` now covers it
+> directly (`tests/verifier-parity.unit.test.ts` shells out to `recompute.mjs`).
 
 > **The database is `fairdrop-demo`, not `fairdrop`.** The bare name `fairdrop` is already
 > claimed on the local instance by an earlier (pre-login) identity, and publishing to it fails
