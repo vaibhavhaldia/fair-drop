@@ -104,8 +104,21 @@ fi
 
 # --- 6. the pure tier ---------------------------------------------------------------------
 # TC-INV-01, TC-CLR-09, TC-CLR-11. These need no server and take under a second.
+#
+# Vitest keeps colour on when redirected to a file, so its summary line reads
+# `Tests \e[22m \e[1m\e[32m14 passed` — escapes sit BETWEEN the label and the count, and a
+# plain /Tests +[0-9]+ passed/ never matches. That printed a confident "ok ... ()" with the
+# evidence silently missing, which is the failure mode this script exists to avoid. Strip the
+# escapes first, and require a count: green with no number to show is not green.
 if npm test --prefix "$MODULE" >/tmp/smoke-tests.log 2>&1; then
-  ok "pure tests green ($(grep -oE 'Tests +[0-9]+ passed' /tmp/smoke-tests.log | head -1))"
+  n_tests="$(sed -E $'s/\033\\[[0-9;]*m//g' /tmp/smoke-tests.log \
+    | grep -oE 'Tests +[0-9]+ passed' | head -1)"
+  if [ -n "$n_tests" ]; then
+    ok "pure tests green ($n_tests)"
+  else
+    bad "pure tests exited 0 but no summary line could be read — see /tmp/smoke-tests.log"
+    note "the suite may have run zero tests; do not read this as a pass"
+  fi
 else
   bad "pure tests failed — see /tmp/smoke-tests.log"
 fi
