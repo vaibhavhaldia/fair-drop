@@ -100,12 +100,26 @@ Verified live on 2026-09-06 against a 10-participant / 4-ticket event.
 | same participant twice, while tickets remain | `E_ALREADY_WON` | C5 — one ticket per participant per event |
 | bid before `open_event`, or after sell-out | `E_EVENT_NOT_OPEN` | The equal-start premise, and the settled door |
 
-**`E_SOLD_OUT` cannot be reached in queue mode, despite being advertised.** The guard exists
-(`index.ts:561`, `if (ev.ticketsRemaining <= 0)`), but the last sale calls `settleImpl` in the
-same transaction, so state is already `settled` by the time the next bid arrives — and the
-`state !== 'open'` check runs first. Every post-sell-out attempt returns `E_EVENT_NOT_OPEN`.
-`CONTRACT.md:206` and `:226` still list `E_SOLD_OUT` as a `submit_bid` outcome. Harmless as
-defence-in-depth, wrong as documentation; the guard should stay, the contract line should go.
+**`E_SOLD_OUT` never fires on the sell-out path**, which is the one place you would go looking
+for it. The last sale calls `settleImpl` in the same transaction, so the state is already
+`settled` when the next bid arrives and `E_EVENT_NOT_OPEN` answers first. Verified: on a
+4-ticket event, participants 48 and 49 both got `E_EVENT_NOT_OPEN`.
+
+To actually see it, open an event with **zero inventory** — `size_inventory` guards
+`participants == 0` but not `totalTickets == 0`, and `round(0.40 x 1) == 0`:
+
+```bash
+EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]')
+PID=$(spacetime call --server local $DB join "$EV" '"Solo"' '"human"')
+spacetime call --server local $DB start_countdown "$EV"   # totalTickets = 0, no error
+spacetime call --server local $DB open_event "$EV"
+spacetime call --server local $DB submit_bid "$EV" "$PID" '0' '15000'   # -> E_SOLD_OUT
+```
+
+That path is worth knowing for a second reason: a one-participant queue event reaches `open`
+looking completely normal and is dead on arrival. `DEMO-RECIPE` tops up to H >= 8, so it should
+not bite on stage — but it is the same "dead event on a projector with no explanation" that the
+`E_NO_PARTICIPANTS` guard exists to prevent, one rounding step further along.
 
 ---
 

@@ -219,6 +219,17 @@ the previous version of this table listed codes an operator could never see. Ver
 The guard is kept in code as defence-in-depth — it is the only one that stays correct if the
 other two are ever reordered — but do not wait for its code in a log. It will not come.
 
+**`E_SOLD_OUT` never fires on the sell-out path** — verified live 2026-09-06. The last sale
+calls `settleImpl` inside the same `submit_bid` transaction, so by the time the next bid arrives
+`state == "settled"` and `E_EVENT_NOT_OPEN` (first in the guard order) answers instead. The only
+way to see `E_SOLD_OUT` is an event that *opens* with zero inventory: `size_inventory` guards
+`participants == 0` but not `totalTickets == 0`, and `round(0.40 x 1) == 0`, so a one-participant
+queue event reaches `open` with `ticketsRemaining == 0` and every bid returns `E_SOLD_OUT`.
+
+Reachable, then, but never for the reason its name suggests. Do not debug a sell-out by looking
+for this code, and do not delete the guard: it is the only thing standing between a
+zero-inventory event and a silent no-op.
+
 **Guard order is frozen**, because the code returned depends entirely on which guard runs first:
 
 ```
