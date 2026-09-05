@@ -53,7 +53,28 @@ else
   exit 1
 fi
 
-# --- 3. publish -------------------------------------------------------------------------
+# --- 3. is it safe to wipe? ---------------------------------------------------------------
+# This script publishes with --delete-data=always, which DESTROYS everything in $DB. That is
+# correct before a rehearsal and catastrophic during one: running Stage 0 to "check the rig"
+# mid-demo would silently delete the event on the projector. A completed event is just as
+# precious — it is the evidence Stage 3 recomputes from.
+if [ "${FORCE:-0}" = "1" ]; then
+  ok "FORCE=1 — wiping '$DB' without checking for live data"
+else
+  ev_rows="$(spacetime sql --server "$SERVER" "$DB" 'SELECT id, state FROM event' 2>/dev/null || true)"
+  al_rows="$(spacetime sql --server "$SERVER" "$DB" 'SELECT id FROM allocation' 2>/dev/null || true)"
+  n_alloc="$(printf '%s\n' "$al_rows" | grep -cE '^[[:space:]]+[0-9]+[[:space:]]*$' || true)"
+  if printf '%s' "$ev_rows" | grep -qE '"(countdown|open|settled)"' || [ "${n_alloc:-0}" -gt 0 ]; then
+    bad "refusing to wipe '$DB' — it holds a live or completed event (${n_alloc:-0} allocations)"
+    note "publishing here uses --delete-data=always and would destroy the demo and its evidence"
+    note "use a scratch db:  DB=fairdrop-scratch ./scripts/smoke.sh"
+    note "or wipe on purpose: FORCE=1 ./scripts/smoke.sh"
+    exit 1
+  fi
+  ok "'$DB' holds no live demo data — safe to republish"
+fi
+
+# --- 4. publish -------------------------------------------------------------------------
 if spacetime publish -p "$MODULE" "$DB" --server "$SERVER" -y --delete-data=always >/tmp/smoke-publish.log 2>&1; then
   ok "published to $DB"
 else
@@ -64,7 +85,7 @@ else
   exit 1
 fi
 
-# --- 4. the real smoke test: a procedure returns a value and the row lands ---------------
+# --- 5. the real smoke test: a procedure returns a value and the row lands ---------------
 # Procedures log a spurious "nonexistent reducer" ERROR on success (CONTRACT §10) — the
 # return value and the committed row are what count, not the log.
 eid="$(spacetime call --server "$SERVER" "$DB" create_event '"smoke"' '"queue"' '0.40' '15000' '[]' 2>/dev/null | tr -d '[:space:]')"
@@ -81,7 +102,7 @@ else
   bad "event row missing or wrong state"; note "$row"
 fi
 
-# --- 5. the pure tier ---------------------------------------------------------------------
+# --- 6. the pure tier ---------------------------------------------------------------------
 # TC-INV-01, TC-CLR-09, TC-CLR-11. These need no server and take under a second.
 if npm test --prefix "$MODULE" >/tmp/smoke-tests.log 2>&1; then
   ok "pure tests green ($(grep -oE 'Tests +[0-9]+ passed' /tmp/smoke-tests.log | head -1))"
@@ -89,7 +110,7 @@ else
   bad "pure tests failed — see /tmp/smoke-tests.log"
 fi
 
-# --- 6. the verifier must agree with the module -------------------------------------------
+# --- 7. the verifier must agree with the module -------------------------------------------
 # TC-CLR-09's whole claim is that an outsider can recompute the draw. If recompute.mjs and
 # src/pure/hash.ts drift apart, that claim is void and nothing else here would notice.
 seed_a="$(node integration/verify/recompute.mjs --event 42 --slot 2 --ids 1,2,3,4,5 2>/dev/null | grep -oE '[0-9a-f]{16}' | head -1)"
@@ -99,10 +120,43 @@ console.log(deriveDrawSeed(42n, 2, [1n,2n,3n,4n,5n]));" 2>/dev/null | tr -d '[:s
 if [ -n "$seed_a" ] && [ "$seed_a" = "$seed_b" ]; then
   ok "standalone verifier agrees with the module ($seed_a)"
 elif [ -z "$seed_b" ]; then
-  note "skipped verifier cross-check (node cannot strip TS types here); run npm test instead"
+  # NOT a skip. This used to `note` and pass, which meant the single guard on TC-CLR-09's
+  # whole claim quietly disappeared on any box with Node < 22.6 — and the advice it printed
+  # ("run npm test instead") pointed at a suite that structurally cannot catch the drift,
+  # because every test in it imported the module's own hash. `npm test` now DOES cover this
+  # (tests/verifier-parity.unit.test.ts shells out to recompute.mjs), so a failure here is a
+  # real toolchain problem, not an acceptable degradation.
+  bad "cannot run the verifier cross-check — node could not load the module's TS"
+  note "need node >= 22.6 for --experimental-strip-types; this box: $(node -v 2>/dev/null || echo 'no node')"
+  note "TC-CLR-09 is unverified until this runs. Do not proceed on the assumption it passed."
 else
   bad "verifier and module DISAGREE — verifier=$seed_a module=$seed_b"
   note "TC-CLR-09 is void until these match. Change one, change both."
+fi
+
+# --- 8. scheduled reducers must stay private to non-owners --------------------------------
+# `close_slot` carries NO sender guard (index.ts), on the grounds that the host makes scheduled
+# reducers private. Verified true on 2.10 (2026-09-06) and pinned here, because if a version
+# bump ever revokes it the module has no second line of defence: any client could close a slot
+# the instant it opens, on an entry set of one, and C1/C4 would be gone with no error anywhere.
+#
+# The control matters as much as the probe. An anonymous identity CAN reach ordinary reducers
+# (open_event turns it away with the module's own E_NOT_ADMIN), so a 404 on close_slot is real
+# privacy enforcement rather than an unauthenticated caller being bounced at the door.
+anon_ctrl="$(spacetime call --server "$SERVER" --anonymous "$DB" open_event '1' 2>&1)"
+anon_close="$(spacetime call --server "$SERVER" --anonymous "$DB" close_slot \
+  '{"scheduled_id":1,"scheduled_at":{"Time":[1]},"event_id":1,"slot_index":0}' 2>&1)"
+
+if ! printf '%s' "$anon_ctrl" | grep -q 'E_NOT_ADMIN'; then
+  bad "privacy control inconclusive — anonymous open_event did not reach the reducer"
+  note "expected E_NOT_ADMIN, got: $(printf '%s' "$anon_ctrl" | grep -iv warning | head -2 | tr '\n' ' ')"
+elif printf '%s' "$anon_close" | grep -qi 'no such procedure'; then
+  ok "close_slot is private to non-owners (anon: 404; control open_event: E_NOT_ADMIN)"
+else
+  bad "SCHEDULED-REDUCER PRIVACY LOST — a non-owner was not refused by close_slot"
+  note "close_slot has no sender guard; a bot can now close a slot early and break C1/C4"
+  note "got: $(printf '%s' "$anon_close" | grep -iv warning | head -2 | tr '\n' ' ')"
+  note "add a guard in index.ts (ctx.senderAuth.isInternal) before running the demo"
 fi
 
 echo
