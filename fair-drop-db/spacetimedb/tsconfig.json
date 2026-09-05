@@ -20,5 +20,6 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["./**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "spike", "tests"]
 }

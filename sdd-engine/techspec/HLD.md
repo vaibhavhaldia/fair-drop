@@ -1,5 +1,34 @@
 # Fair Drop — High-Level Design
 
+
+> ## ⚠ SCOPE CUT — 2026-09-05 · target 3.5–4h, build-and-test at each stage
+>
+> The 8-gate, 30–35h-per-engineer plan is **abandoned**. This document remains the *design
+> reasoning* and is correct as written, but much of it is **not being built today**. The build
+> plan is `sdd-engine/tasks/saksham.md` and `.../vaibhav.md`; the frozen interface is
+> `docs/CONTRACT.md`.
+>
+> **In scope:** 7 tables · `create_event`/`join`/`start_countdown`/`open_event` ·
+> `submit_bid` (both branches) · `close_slot` with a **pure** draw · `settle` · a bot script
+> (40 bots) · one display.
+>
+> **Out of scope:** the bot-runner HTTP service · QR onboarding · phone view · dashboard
+> polish · the TS port of `sim.py` (run the existing Python) · the enforced `clients/sdk`
+> layer · all Playwright/E2E · the 1,250-participant load test · ~200 of the 219 test cases.
+>
+> **Cut in the 4h re-plan specifically:** two of the three scheduled tables. Only
+> `slot_schedule` survives — turn mode genuinely needs slots to auto-advance. `open_event` and
+> `settle` become **admin-triggered**, which removes `countdown_schedule` and
+> `settle_schedule` along with their two dead-event failure modes. The bounded connection pool
+> is also deferred: at 40 bots, one connection each is fine. **The schema does not change** —
+> `participant.id` stays the PK and `identity` stays non-unique, so re-introducing the pool
+> later needs no migration.
+>
+> **Two tests are being written**, both against the pure draw: TC-INV-01 (shuffled order →
+> identical allocations) and TC-CLR-09 (recompute the draw outside the module). Reducers
+> **cannot** be unit-tested — `spacetimedb/server` imports `spacetime:sys@2.0`, a host-only
+> module scheme vitest cannot load. Everything else is verified by running the demo.
+
 Status: Draft v3 — revised for random-among-qualifying clearing, turnout-scaled inventory,
 and one-ticket-per-participant
 Source material: `sdd-engine/context/fair-drop-brief.pdf`, `sdd-engine/context/chat.md`,
@@ -35,10 +64,10 @@ These five constraints are the spec. Every component below exists to satisfy the
 | ID | Invariant | Statement |
 |----|-----------|-----------|
 | C1 | `weight(t_arrival) = 0` within a turn | Submitting first vs. last inside an open slot must produce identical allocation outcomes for the same entry set. This extends to the draw itself: which qualifying entries win must be independent of arrival order — see §5. |
-| C2 | `entries(identity, turn) ≤ 1` | One entry per identity per slot, enforced as a uniqueness constraint. |
+| C2 | `entries(participantId, turn) ≤ 1` | One entry per participant per slot. **Not** a schema constraint — SpacetimeDB supports single-column uniqueness only, so this is a check-then-insert inside `submit_bid`, correct solely because reducers execute serially (LLD §2). Keyed on `participantId`, not identity: pooled bot connections share one identity across many participants (§6, LLD §5a). |
 | C3 | One authoritative clearing state | Clearing is a single serialized write; every subscriber observes the same resulting state — the outcome is checkable, not asserted. |
 | C4 | State fan-out creates no second latency race | Published state (clearing price, remaining inventory) must reach all participants simultaneously, or whoever learns first regains the speed advantage through the information channel instead of the submission channel. |
-| C5 | `allocations(identity, event) ≤ 1` | A participant may win at most one ticket per event. Once allocated, they are ineligible for every later slot. Enforced in the module, not by client behaviour. |
+| C5 | `allocations(participantId, event) ≤ 1` | A participant may win at most one ticket per event. Once allocated, they are ineligible for every later slot. Enforced in the module, not by client behaviour. Participant rows are scoped to an event (`participant.eventId`), so "per event" is true by construction rather than by convention. |
 
 C4 is the constraint most designs miss, and it is why the platform choice matters (§7).
 
@@ -48,7 +77,9 @@ C4 is the constraint most designs miss, and it is why the platform choice matter
 
 ```
 Scan QR → enter display name → participant created
-   → server mints identity (unique id) + display name
+   → server mints a participantId (unique) + a unique handle (displayName + random suffix);
+     the connection's SpacetimeDB identity is recorded for audit but does NOT identify the
+     participant — one pooled connection backs many of them (§6)
    → wallet credited randomUniform(₹20,000, ₹1,50,000) (dummy, session-scoped)
    → 4 bot participants auto-spawned alongside this human (see §6)
    → land on "all events" list
@@ -93,17 +124,27 @@ Slot 5 — floor ₹55,000
 ```
 
 Floors strictly increase (enforced at event creation, not merely recommended). Quota is split
-**evenly** across the five slots — `quota = totalTickets / 5` — because inventory now scales
-with turnout (below), so the drama comes from the shrinking eligible field rather than from
-shrinking quotas.
+**evenly** across the five slots — `baseQuota ≈ totalTickets / 5` — because inventory now
+scales with turnout (below), so the drama comes from the shrinking eligible field rather than
+from shrinking quotas.
 
-**Inventory scales with turnout.** `totalTickets` is *not* fixed at event creation. When the
-event opens, the module computes:
+**Inventory scales with turnout.** `totalTickets` is *not* fixed at event creation. At
+`start_countdown` — the one moment the headcount is both final and known — the module computes:
 
 ```
-totalTickets := round(0.40 × registered participants)
-quota per slot := totalTickets / 5
+totalTickets := round(0.40 × participants registered for THIS event)
+base         := floor(totalTickets / 5)
+baseQuota[i] := base + (i < totalTickets − base × 5 ? 1 : 0)   // remainder to EARLIEST slots
 ```
+
+`round` is half-away-from-zero. The remainder goes to the earliest slots rather than the last
+one: at small turnouts the old "all remainder to the final slot" rule left the early slots
+empty and sold everything at the top floor — see LLD §2c. The two rules agree whenever 5
+divides `totalTickets`, which covers every demo-scale number.
+
+`baseQuota` is never mutated after this point; rollover accumulates in a separate
+`effectiveQuota` (LLD §1), which is what keeps `sum(baseQuota) == totalTickets` true for the
+whole event rather than only until the first slot closes.
 
 Turnout is the one demo variable nobody controls — it may be 50 humans (250 participants) or
 250 humans (1,250 participants). Fixed inventory makes the demo swing wildly across that
@@ -273,7 +314,10 @@ system can actually support.
 - **Identity.** Bots are participants like any other — `displayName = "Bot-<random>"`,
   `origin = "bot"` — with a wallet drawn from the same `randomUniform(₹20,000, ₹1,50,000)`
   distribution as humans, and subject to the same guards.
-- **Behaviour — queue mode.** Hit the buy endpoint at `t_open + random(0, δ)` for a small δ,
+- **Behaviour — queue mode.** Hit the buy endpoint at `t_open + random(0, δ)` where **δ = 500ms is the upper bound**, not
+  the delay: each bot independently draws its own value uniformly on `[0, 500ms]`, mean 250ms.
+  That is best-case *human* speed, deliberately handicapped so Round 1's outcome cannot be
+  dismissed as rigged. For a small δ,
   then wait for the result. Fast, but still "arrival-order" behaviour — this is what Round 1 is
   supposed to reward.
 - **Behaviour — turn mode.** Each slot: if the bot has already won, it is ineligible (C5) and
@@ -329,10 +373,14 @@ invariants structural rather than something we have to prove by testing.
 └──────────────────────────┘
 ```
 
-- **Module** — owns `event`, `slot`, `participant`, `bid`, `allocation`, `slot_result` tables
-  and the `create_event` / `start_countdown` / `open_event` / `join` / `submit_bid` /
-  `close_slot` / `settle` reducers. Nothing outside the module decides allocation or moves
-  wallet balance.
+- **Module** — owns `event`, `slot`, `participant`, `bid`, `allocation`, `slot_result`, plus
+  scheduled tables. **4h build: seven tables** — only `slot_schedule` survives;
+  `countdown_schedule` and `settle_schedule` are cut. Entry points are `create_event` and
+  `join` (**procedures** — only these can return a generated id), `start_countdown`,
+  `submit_bid`, and — in the 4h build — `open_event` and `settle` as **admin-called reducers**
+  (both guarded by `E_NOT_ADMIN`, since they lose the scheduled-reducers-are-private
+  protection). `close_slot` remains scheduler-invoked and private. Nothing outside the module
+  decides allocation or moves wallet balance.
 - **Onboarding / bot-runner service** — a small Node service the QR-scan web page calls on
   participant creation. It creates the human participant (via the module) and registers 4 bot
   participants, each running its own entry loop.
@@ -366,8 +414,12 @@ admin creates event → participants join (humans trigger 4 bots each)
                                                      ▼
                                     participants/bots observe state
                                                      ▼
-                             slots/inventory left? → next slot : settle → dashboard/scoreboard
+                             slots/inventory left? → next slot : settle → dashboard
 ```
+
+The final scoreboard is a **read-model**, not a written table: the human/bot split is derived
+on read from `Allocation` JOIN `Participant.origin` (LLD §8). `settle` writes only
+`event.state` and `event.endTime`.
 
 The master acceptance property is unchanged: flipping one field (`mode: "queue"` →
 `mode: "turn"`) while holding participants, strategies, inventory, UI, and network conditions
