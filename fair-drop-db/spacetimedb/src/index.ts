@@ -21,8 +21,13 @@
 
 import { schema, table, t, SenderError, ScheduleAt } from 'spacetimedb/server';
 import { Timestamp } from 'spacetimedb';
-import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory';
-import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw';
+// Explicit `.ts` extensions, consistently, in every intra-`src/` import. Not a style choice:
+// `scripts/smoke.sh` and `tests/verifier-parity.unit.test.ts` load these modules directly with
+// `node --experimental-strip-types`, which does NOT resolve extensionless relative specifiers.
+// `draw.ts` already needed the extension for that reason; having only one file carry it was
+// the inconsistency. `allowImportingTsExtensions` in tsconfig.json is what permits this.
+import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory.ts';
+import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw.ts';
 
 /** Countdown and per-slot window, both 60s (LLD §1a). */
 const COUNTDOWN_SECONDS = 60;
@@ -364,15 +369,29 @@ export const join = spacetimedb.procedure(
       // Module RNG, never Math.random — the wallet draw must be replayable. Contrast the
       // allocation draw, which must never touch ctx.random at all (CONTRACT §4).
       const draw = ctx.random.integerInRange(20_000, 150_000);
-      const suffix = ctx.random.integerInRange(0, 0xffff).toString(16);
+      // 32 bits, not 16. `handle` is UNIQUE GLOBALLY while participants are per-event, so the
+      // birthday space is every row the instance has ever held, not this event's headcount.
+      // At 16 bits and 40 bots sharing a displayName that is a ~1% collision per rehearsal,
+      // rising across rehearsals that do not wipe. Scoping the handle by `eventId` as well
+      // confines a collision to one event and one name.
+      const suffix = ctx.random.integerInRange(0, 0xffffffff).toString(16).padStart(8, '0');
+      const handle = `${eventId}-${displayName}-${suffix}`;
 
-      // A duplicate `handle` throws and rolls the row back (verified, CONTRACT §10), so
-      // E_HANDLE_COLLISION is a real catchable path. Bots retry with a fresh suffix.
+      // CHECK-THEN-INSERT, not try/catch. A duplicate insert does throw and roll back
+      // (CONTRACT §10), but the error it raises is the host's constraint violation, NOT
+      // `E_HANDLE_COLLISION` — so a bot pool matching on the documented code would never
+      // match, and the DEMO-RECIPE line telling the operator to grep for it in `spacetime
+      // logs` would never fire. Safe for the same reason C2's check-then-insert is safe:
+      // reducers serialize. This is what makes the code in CONTRACT §9 real.
+      if (tx.db.participant.handle.find(handle) != null) {
+        throw new SenderError('E_HANDLE_COLLISION');
+      }
+
       const row = tx.db.participant.insert({
         id: 0n,
         eventId,
         identity: ctx.sender,
-        handle: `${displayName}-${suffix}`,
+        handle,
         displayName,
         origin,
         initialBalance: draw,
@@ -607,9 +626,19 @@ export const submitBid = spacetimedb.reducer(
  * A thin caller over `src/pure/draw.ts`. The ranking lives there because it is the only part
  * of this that can be unit-tested, and it happens to be the part that matters.
  *
- * **No sender guard.** Scheduled reducers are private by default in 2.x, and `ConnectionId` is
- * `None` for scheduler-invoked calls — a `ctx.sender == module identity` guard is more likely
- * to be written wrong than to catch anything. The real guard is "no `slot_result` exists".
+ * **No sender guard, and this is now verified rather than assumed** (2026-09-06, live 2.10
+ * instance). A scheduled reducer is genuinely private to non-owners: an anonymous identity
+ * calling `close_slot` over HTTP gets `404 No such procedure`, while the same identity calling
+ * `open_event` reaches the reducer and is turned away by its own `E_NOT_ADMIN`. So the 404 is
+ * real privacy enforcement, not a routing artifact, and a bot CANNOT close a slot early.
+ * What the platform does NOT stop is the database OWNER invoking it by hand — verified by
+ * closing slot 0 at t=0s, far inside the 60s window. That is the admin, who can end the round
+ * anyway, so it is not an integrity hole; it is a host behaviour this module depends on.
+ * `scripts/smoke.sh` pins it, so a version bump cannot revoke it silently.
+ *
+ * A hand-rolled `ctx.sender == ctx.databaseIdentity` guard is still declined: it is more likely
+ * to be written wrong than to catch anything the host does not already catch. The real
+ * in-module guard is "no `slot_result` exists".
  *
  * **MUST NOT call `ctx.random`** (TC-CLR-14). The draw is a pure function of `drawSeed`, itself
  * a pure function of committed state. An RNG-seeded draw still looks uniform and still passes
@@ -621,19 +650,43 @@ export const closeSlot = spacetimedb.reducer(
   (ctx, { timer }) => {
     const ev = ctx.db.event.id.find(timer.eventId);
     if (ev == null) return;
-    // Silent returns, not throws: a scheduled reducer has no caller to receive an error, and
-    // throwing would only fill the log during a demo.
-    if (ev.state !== 'open' || ev.mode !== 'turn') return;
+    // Silent returns, not throws: a scheduled reducer has no caller to receive an error.
+    // But silent must not mean INVISIBLE — CONTRACT §9 lists codes for these paths, and an
+    // operator debugging a stuck slot greps the log for them. Each return names its code, so
+    // the documented code is something `spacetime logs` can actually show.
+    if (ev.state !== 'open' || ev.mode !== 'turn') {
+      console.info(
+        `close_slot: E_WRONG_STATE event=${timer.eventId} state=${ev.state} mode=${ev.mode}`
+      );
+      return;
+    }
 
     // E_STALE_TIMER. The timer names the slot it was scheduled for, so a stale row cannot close
     // a slot it was never meant to. Reading `currentSlotIndex` alone would let it, and the
     // double-close guard below cannot detect that case.
-    if (timer.slotIndex !== ev.currentSlotIndex) return;
+    if (timer.slotIndex !== ev.currentSlotIndex) {
+      console.info(
+        `close_slot: E_STALE_TIMER event=${timer.eventId} timerSlot=${timer.slotIndex} ` +
+          `currentSlot=${ev.currentSlotIndex}`
+      );
+      return;
+    }
 
     // A `slot_result` row existing IS the closed-marker. There is no `closed` flag, and
     // `filled == 0` is not one either — a slot can legitimately close having allocated nothing.
+    //
+    // UNREACHABLE in practice, and kept anyway. Probed live 2026-09-06 against every
+    // double-close shape: closing a non-last slot twice advances `currentSlotIndex` first, so
+    // the second call is caught above by E_STALE_TIMER; closing the last slot twice settles the
+    // event first, so the second call is caught by E_WRONG_STATE. There is no state where a
+    // `slot_result` exists for the CURRENT slot of an OPEN event. Retained as defence-in-depth
+    // because it is the only guard that stays correct if either of those two is ever reordered
+    // — but CONTRACT §9 no longer advertises the code, because it cannot be observed.
     for (const _r of ctx.db.slotResult.by_event_slot.filter([timer.eventId, timer.slotIndex])) {
-      return; // E_SLOT_ALREADY_CLOSED
+      console.info(
+        `close_slot: E_SLOT_ALREADY_CLOSED event=${timer.eventId} slot=${timer.slotIndex}`
+      );
+      return;
     }
 
     const slotRow = findSlot(ctx as any, timer.eventId, timer.slotIndex);
