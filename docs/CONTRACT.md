@@ -429,6 +429,23 @@ match the reducer names in §3, so nothing changes — but call them by the snak
 - `spacetime publish -p <path>` — **not** `--project-path`, which does not exist in 2.9.
 - Republish over a changed schema with `--delete-data=always`, not `-c always`.
 - SQL has no `GROUP BY`. Aggregate in the client or the display.
+- **SQL has no `COUNT(*)` either** — same rule, same fix. `SELECT COUNT(*) FROM t` 400s.
+- **`floor` is a reserved SQL keyword.** `SELECT slotIndex, floor FROM slot` is a parse error;
+  quote it as `"floor"`. It is the one column name in §2 that collides.
+- **Procedures log a spurious `ERROR` on every successful call** — `create_event` and `join`
+  both emit *"External attempt to call nonexistent reducer … Have you run `spacetime generate`
+  recently?"* while returning the right value and committing the row. Verified 2026-09-05: ids
+  came back and the rows landed. Stage 0 keeps `spacetime logs` open on a third screen, so
+  expect a wall of red during joins and do **not** debug it live.
+- **The local instance serves no web UI.** `http://127.0.0.1:3000/` returns 404 *by design* —
+  it is the API root. A 404 there means the server is up; a dead port gives connection refused.
+  Check with `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/v1/ping` → 200.
+- **Local databases never appear on spacetimedb.com.** That dashboard shows Maincloud only, so
+  an empty Databases list there is expected and is not a symptom. `spacetime list --server local`
+  is the local equivalent.
+- **The demo database is `fairdrop-demo`.** The bare name `fairdrop` is claimed on the local
+  instance by an earlier pre-login identity and 403s on publish (*"not authorized … reset
+  database"*). Renaming was chosen over resetting the instance — see DEMO-RECIPE Stage 0.
 
 ---
 
