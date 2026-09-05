@@ -35,17 +35,31 @@ function fnv1a64(input) {
   return h;
 }
 
+// SplitMix64 finalizer. NOT optional: raw FNV-1a barely avalanches on the tail of its input,
+// and bid ids are sequential autoInc PKs differing only at the end — so without this the
+// ranking follows id order, which is arrival order, and C1 is violated through the back door.
+// The module's src/pure/hash.ts carries the same five lines and the measurements. TC-CLR-11.
+function mix64(h) {
+  h = (h ^ (h >> 33n)) & MASK;
+  h = (h * 0xff51afd7ed558ccdn) & MASK;
+  h = (h ^ (h >> 33n)) & MASK;
+  h = (h * 0xc4ceb9fe1a85ec53n) & MASK;
+  return (h ^ (h >> 33n)) & MASK;
+}
+
+const digest64 = s => mix64(fnv1a64(s));
+
 const hex64 = v => (v & MASK).toString(16).padStart(16, '0');
 
 const deriveSeed = (eventId, slotIndex, ids) =>
-  hex64(fnv1a64(`${eventId}:${slotIndex}:${[...ids].sort(cmp).join(',')}`));
+  hex64(digest64(`${eventId}:${slotIndex}:${[...ids].sort(cmp).join(',')}`));
 
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Rank by hash(seed, id) ascending, ties on id ascending. */
 function rank(seed, ids) {
   return ids
-    .map(id => ({ id, key: fnv1a64(`${seed}:${id}`) }))
+    .map(id => ({ id, key: digest64(`${seed}:${id}`) }))
     .sort((a, b) => (a.key !== b.key ? cmp(a.key, b.key) : cmp(a.id, b.id)))
     .map(e => e.id);
 }

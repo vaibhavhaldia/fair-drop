@@ -19,11 +19,39 @@ Legend: **A**rrange · **A**ct · **C**heck.
 | **A** | `export PATH="$HOME/.local/bin:$PATH"` — the CLI is installed but **not on PATH** |
 | **A** | `spacetime --version` → must read **2.10.0**, matching `spacetimedb@2.10.0` in `package.json`. It is `current`, so this normally just passes; if it reads anything else, `spacetime version use 2.10.0`. CLI and lib are pinned to the same version on purpose — CONTRACT §1 |
 | **A** | `spacetime start` in its own terminal — leave it running, it is the demo |
-| **Act** | `spacetime publish -p fair-drop-db/spacetimedb fairdrop --server local -y` |
-| **Act** | `spacetime call --server local fairdrop add '"smoke"'` |
-| **Act** | `spacetime sql --server local fairdrop "SELECT * FROM person"` |
-| **C** ✅ | The row comes back. **If this fails, stop — nothing downstream matters.** |
+| **Act** | `./scripts/smoke.sh` |
+| **C** ✅ | Prints **Stage 0 passed — 9 checks**. **If it fails, stop — nothing downstream matters.** |
 
+> **Stage 0 is a script, not a checklist, and that is deliberate.** It used to be four commands
+> in this table; when the scaffold was deleted at Gate 1 it went on describing `add` and
+> `person`, neither of which existed any more, and nothing noticed — prose that rots stays
+> confident, a script that rots *fails*. `scripts/smoke.sh` checks the CLI pin, that the
+> instance is actually up, that `$DB` holds no live event it is about to destroy, the publish,
+> the procedure return path, the row landing, the pure tests, that `recompute.mjs` still agrees
+> with the module's own hash, and that `close_slot` is still private to non-owners.
+>
+> **It refuses to run if `$DB` holds a live or completed event.** Stage 0 publishes with
+> `--delete-data=always`; running it to "just check the rig" mid-demo would delete the event on
+> the projector, and a settled event is the evidence Stage 3 recomputes from. Use
+> `DB=fairdrop-scratch ./scripts/smoke.sh` to check the rig without touching the demo, or
+> `FORCE=1` to wipe on purpose.
+>
+> **The verifier cross-check fails, it never skips.** It used to print a note and pass when
+> `node --experimental-strip-types` was unavailable — which silently removed the only guard on
+> TC-CLR-09 and pointed you at `npm test`, a suite that at the time could not catch the drift
+> at all because every test in it imported the module's own hash. `npm test` now covers it
+> directly (`tests/verifier-parity.unit.test.ts` shells out to `recompute.mjs`).
+
+> **The database is `fairdrop-demo`, not `fairdrop`.** The bare name `fairdrop` is already
+> claimed on the local instance by an earlier (pre-login) identity, and publishing to it fails
+> with a 403 *"not authorized … reset database"*. Check what you own with
+> `spacetime list --server local`. Nothing about the demo depends on the name.
+>
+> **The local instance has no web UI.** `http://127.0.0.1:3000/` returns 404 by design — that
+> is the API root, not a dashboard, and a 404 there means the server is *up* (a dead port gives
+> connection refused). Local databases never appear on spacetimedb.com, which shows Maincloud
+> only. Inspect with `spacetime sql` / `logs`, or `curl /v1/ping`.
+>
 > **`--server local` is required on every command.** `fair-drop-db/spacetime.json` says
 > `"server": "maincloud"`, so `call`/`sql`/`logs` go looking there and fail with
 > *"failed to find database"* even though the publish succeeded. Also run `call`/`sql` from
@@ -33,7 +61,7 @@ Legend: **A**rrange · **A**ct · **C**heck.
 
 **Rig checklist before every rehearsal and before the real run:**
 
-- [ ] `spacetime start` running, database published, `spacetime logs --server local fairdrop` open in a third terminal
+- [ ] `spacetime start` running, database published, `spacetime logs --server local fairdrop-demo` open in a third terminal
 - [ ] Display open on the projector, **font size checked from the back of the room**
 - [ ] Bot script ready, count set to **4 × H** (40 at the target H = 10) — the 4:1 ratio is what the Round 2 claim rests on
 - [ ] `spacetime sql` terminal open for live verification — the audience seeing you query raw state is the *point*
@@ -187,7 +215,7 @@ only your word for it.
 
 | | |
 |---|---|
-| **A** | `spacetime sql fairdrop "SELECT slotIndex, drawSeed, clearingPrice, allocated FROM slot_result"` |
+| **A** | `spacetime sql --server local fairdrop-demo "SELECT slotIndex, drawSeed, clearingPrice, allocated FROM slot_result"` |
 | **Act** | Read a `drawSeed` aloud. Run the standalone recompute script against that slot's committed entries |
 | **C** ✅ | Recomputed winner set matches the module's **exactly** · **TC-CLR-09** |
 | **Act** | `npx vitest run` — TC-INV-01 shuffles insertion order ≥100 ways |

@@ -9,6 +9,10 @@
     "strict": true,
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    /* Intra-`src/` imports carry explicit `.ts` extensions because smoke.sh and the
+     * verifier-parity test load these modules with `node --experimental-strip-types`,
+     * which does not resolve extensionless relative specifiers. Safe with noEmit. */
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
 
     /* The following options are required by SpacetimeDB
