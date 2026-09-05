@@ -9,6 +9,7 @@
 // per-bot OS process).
 
 import type { BotClient } from "./runner.ts";
+import type { TurnBotClient } from "./turnRunner.ts";
 import { FairDropClient } from "../../sdk/FairDropClient.ts";
 
 const DEFAULT_URI = "http://127.0.0.1:3000";
@@ -52,4 +53,49 @@ export async function createRealBotClient(
 ): Promise<{ client: FairDropClient; botClient: BotClient }> {
   const client = await FairDropClient.connect(uri, dbName);
   return { client, botClient: toBotClient(client) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Turn mode (Gate 3). Same seam as `toBotClient` above: the SDK stays a thin §3 wrapper, and the
+// bot-side reads that `TurnView` needs are assembled here from the SDK's existing cache
+// accessors (`listEvents`, `listSlots`, `listParticipants`) rather than by reaching into
+// `./generated`. No arithmetic happens on this side — `walletBalance` is the subscribed row as
+// the module wrote it (task file "Display": "Never compute a balance client-side").
+// ---------------------------------------------------------------------------------------------
+
+/** Wraps a connected `FairDropClient` as a `TurnBotClient` for one event. */
+export function toTurnBotClient(client: FairDropClient, eventId: bigint): TurnBotClient {
+  const base = toBotClient(client);
+  return {
+    ...base,
+    getEvent(id) {
+      const row = client.listEvents().find((e) => e.id === id);
+      if (row == null) return undefined;
+      return {
+        state: row.state,
+        currentSlotIndex: row.currentSlotIndex,
+        slotCount: row.slotCount,
+      };
+    },
+    getSlot(id, slotIndex) {
+      const row = client.listSlots(id).find((s) => s.slotIndex === slotIndex);
+      return row == null ? undefined : { floor: row.floor };
+    },
+    getParticipant(participantId) {
+      const row = client.listParticipants(eventId).find((p) => p.id === participantId);
+      return row == null
+        ? undefined
+        : { walletBalance: row.walletBalance, hasWon: row.hasWon };
+    },
+  };
+}
+
+/** Connects a fresh `FairDropClient` and returns it wrapped as a `TurnBotClient`. */
+export async function createRealTurnBotClient(
+  eventId: bigint,
+  uri: string = DEFAULT_URI,
+  dbName: string = "fairdrop-scratch"
+): Promise<{ client: FairDropClient; botClient: TurnBotClient }> {
+  const client = await FairDropClient.connect(uri, dbName);
+  return { client, botClient: toTurnBotClient(client, eventId) };
 }
