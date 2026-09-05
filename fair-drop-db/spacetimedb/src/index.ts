@@ -21,7 +21,8 @@
 
 import { schema, table, t, SenderError, ScheduleAt } from 'spacetimedb/server';
 import { Timestamp } from 'spacetimedb';
-import { sizeInventory, InventoryError } from './pure/inventory';
+import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory';
+import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw';
 
 /** Countdown and per-slot window, both 60s (LLD §1a). */
 const COUNTDOWN_SECONDS = 60;
@@ -601,17 +602,150 @@ export const submitBid = spacetimedb.reducer(
 );
 
 /**
- * `close_slot` — GATE 3. Stub for now; `slot_schedule` needs the reference to compile.
+ * `close_slot` — the turn-mode clearing rule. This is where C1 is satisfied or violated.
  *
- * When implemented it must: guard `timer.slotIndex == event.currentSlotIndex` (E_STALE_TIMER),
- * refuse a second close (a `slot_result` row existing IS the closed flag), call the pure
- * `drawSlot`, and NEVER touch `ctx.random`.
+ * A thin caller over `src/pure/draw.ts`. The ranking lives there because it is the only part
+ * of this that can be unit-tested, and it happens to be the part that matters.
+ *
+ * **No sender guard.** Scheduled reducers are private by default in 2.x, and `ConnectionId` is
+ * `None` for scheduler-invoked calls — a `ctx.sender == module identity` guard is more likely
+ * to be written wrong than to catch anything. The real guard is "no `slot_result` exists".
+ *
+ * **MUST NOT call `ctx.random`** (TC-CLR-14). The draw is a pure function of `drawSeed`, itself
+ * a pure function of committed state. An RNG-seeded draw still looks uniform and still passes
+ * every behavioural check, but a third party has no access to that stream — so verifiability
+ * would die *silently*. Contrast `join`, where the wallet draw MUST use `ctx.random`.
  */
 export const closeSlot = spacetimedb.reducer(
   { timer: slotSchedule.rowType },
-  (_ctx, { timer }) => {
-    console.info(
-      `close_slot STUB — event ${timer.eventId} slot ${timer.slotIndex}. Implemented at Gate 3.`
-    );
+  (ctx, { timer }) => {
+    const ev = ctx.db.event.id.find(timer.eventId);
+    if (ev == null) return;
+    // Silent returns, not throws: a scheduled reducer has no caller to receive an error, and
+    // throwing would only fill the log during a demo.
+    if (ev.state !== 'open' || ev.mode !== 'turn') return;
+
+    // E_STALE_TIMER. The timer names the slot it was scheduled for, so a stale row cannot close
+    // a slot it was never meant to. Reading `currentSlotIndex` alone would let it, and the
+    // double-close guard below cannot detect that case.
+    if (timer.slotIndex !== ev.currentSlotIndex) return;
+
+    // A `slot_result` row existing IS the closed-marker. There is no `closed` flag, and
+    // `filled == 0` is not one either — a slot can legitimately close having allocated nothing.
+    for (const _r of ctx.db.slotResult.by_event_slot.filter([timer.eventId, timer.slotIndex])) {
+      return; // E_SLOT_ALREADY_CLOSED
+    }
+
+    const slotRow = findSlot(ctx as any, timer.eventId, timer.slotIndex);
+    if (slotRow == null) return;
+
+    const entries: Entry[] = [];
+    const bidRows: any[] = [];
+    for (const b of ctx.db.bid.by_event_slot.filter([timer.eventId, timer.slotIndex])) {
+      entries.push({ id: b.id, participantId: b.participantId });
+      bidRows.push(b);
+    }
+
+    // The seed depends on the sorted SET of entry ids in this slot — data that does not exist
+    // until the slot closes, which is what makes it unpredictable in advance (C4). It
+    // deliberately does not use `seq`, arrival order, or participant identity: ids are assigned
+    // sequentially at join, so "lowest identity wins" would be join-order-in-disguise, exactly
+    // the C1 violation this mechanism exists to remove.
+    const drawSeed = deriveDrawSeed(timer.eventId, timer.slotIndex, entries.map(e => e.id));
+    const ranked = rankEntries(drawSeed, entries);
+
+    const bidById = new Map<bigint, any>(bidRows.map(b => [b.id, b]));
+    let filled = 0;
+    let ticketsRemaining = ev.ticketsRemaining;
+
+    for (const entry of ranked) {
+      const bidRow = bidById.get(entry.id);
+      if (filled >= slotRow.effectiveQuota) {
+        ctx.db.bid.id.update({ ...bidRow, state: 'lost' });
+        continue;
+      }
+      const p = ctx.db.participant.id.find(entry.participantId);
+      if (p == null) {
+        ctx.db.bid.id.update({ ...bidRow, state: 'rejected' });
+        continue;
+      }
+      // Both skips are defence-in-depth and should be unreachable: `submit_bid` already blocks
+      // a winner (C5), and under C5 a balance cannot move between submit and close within one
+      // event. The policy is stated rather than exercised — pass the ticket to the next in draw
+      // order, never produce a negative balance. TC-CLR-12/13 assert these never fire.
+      if (p.hasWon || p.walletBalance < slotRow.floor) {
+        ctx.db.bid.id.update({ ...bidRow, state: 'rejected' });
+        continue;
+      }
+
+      // Allocation and debit in the same transaction, at the slot's uniform price. Every winner
+      // in the slot pays exactly this — there is no per-winner price under pay-the-floor.
+      ctx.db.allocation.insert({
+        id: 0n,
+        eventId: timer.eventId,
+        slotIndex: timer.slotIndex,
+        participantId: entry.participantId,
+        pricePaid: slotRow.floor,
+      });
+      ctx.db.participant.id.update({
+        ...p,
+        walletBalance: p.walletBalance - slotRow.floor,
+        hasWon: true,
+      });
+      ctx.db.bid.id.update({ ...bidRow, state: 'won' });
+      filled++;
+      ticketsRemaining--;
+    }
+
+    const unfilled = slotRow.effectiveQuota - filled;
+    ctx.db.slot.id.update({ ...slotRow, filled });
+
+    // Single serialized write, exactly once per close. `drawSeed` is published here so anyone
+    // can recompute the winner set from committed state — see integration/verify/recompute.mjs.
+    ctx.db.slotResult.insert({
+      id: 0n,
+      eventId: timer.eventId,
+      slotIndex: timer.slotIndex,
+      clearingPrice: slotRow.floor,
+      entriesReceived: slotRow.entriesReceived,
+      allocated: filled,
+      quotaRemainingAfterRollover: unfilled,
+      drawSeed,
+    });
+
+    const nextIndex = timer.slotIndex + 1;
+    if (nextIndex >= ev.slotCount || ticketsRemaining === 0) {
+      // Unfilled on the LAST slot is discarded, not rolled — there is nowhere to roll it.
+      ctx.db.event.id.update({ ...ev, ticketsRemaining });
+      // settleImpl, NOT settle: this is scheduler-invoked and would fail E_NOT_ADMIN.
+      settleImpl(ctx as any, timer.eventId);
+      return;
+    }
+
+    // Rollover. `baseQuota` is NEVER touched here — that is what keeps
+    // sum(baseQuota) == totalTickets true for the life of the event.
+    // At the locked parameters `unfilled` is always 0, so this branch is correct but never
+    // observed on stage; it is tested against the pure inventory module instead.
+    const nextSlot = findSlot(ctx as any, timer.eventId, nextIndex);
+    if (nextSlot != null) {
+      ctx.db.slot.id.update({
+        ...nextSlot,
+        effectiveQuota: effectiveQuota(nextSlot.baseQuota, unfilled),
+      });
+    }
+
+    const endsAt = secondsFrom(ctx.timestamp, SLOT_WINDOW_SECONDS);
+    ctx.db.event.id.update({
+      ...ev,
+      ticketsRemaining,
+      currentSlotIndex: nextIndex,
+      currentSlotEndsAt: endsAt,
+    });
+    ctx.db.slotSchedule.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(endsAt.microsSinceUnixEpoch),
+      eventId: timer.eventId,
+      slotIndex: nextIndex,
+    });
   }
 );
