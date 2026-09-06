@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm --prefix clients/web ci",
+  "buildCommand": "VITE_STDB_URI=${VITE_STDB_URI:-https://maincloud.spacetimedb.com} VITE_STDB_DB=${VITE_STDB_DB:-fairdrop-demo} npm --prefix clients/web run build",
+  "outputDirectory": "clients/web/dist",
+  "rewrites": [{ "source": "/admin", "destination": "/admin.html" }]
+}

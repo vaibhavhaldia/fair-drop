@@ -11,7 +11,7 @@ Three processes, and **all three are outbound clients**. Nothing accepts an inbo
 phones / laptops ──wss──►                            ◄──wss── bot driver
                             SpacetimeDB                        (laptop or hosted)
 static React pages ──wss──►  (Maincloud, or local)
-   (Netlify, or vite)
+   (Vercel, or vite)
 ```
 
 The React pages are static files. There is no application server, no API, no session store —
@@ -65,7 +65,7 @@ Two things to get right if you do host it:
 | Piece | Where | Address |
 |---|---|---|
 | Module | SpacetimeDB Maincloud | `https://maincloud.spacetimedb.com`, database `fairdrop-demo` |
-| Pages | Netlify (static) | build base is the **repo root**, config in `netlify.toml` |
+| Pages | Vercel (static) | **Root Directory must be the repo root**, config in `vercel.json` |
 | Bot driver | Wherever you run it | `FAIRDROP_URI=https://maincloud.spacetimedb.com` |
 
 ```bash
@@ -74,8 +74,8 @@ spacetime login                      # once
 spacetime publish --server maincloud --module-path fair-drop-db/spacetimedb fairdrop-demo
 
 # pages
-netlify login                        # once (or export NETLIFY_AUTH_TOKEN)
-netlify deploy --prod                # from the repo root, reads netlify.toml
+vercel login                         # once (or export VERCEL_TOKEN)
+vercel deploy --prod                 # from the repo root, reads vercel.json
 
 # bots, against the deployed module — same process model as local, only the URI changes
 cd clients/bots
@@ -91,6 +91,30 @@ reach the module. That is fine for turn mode, which resolves on a 45s wall clock
 **not** fine for a Round 1 that claims to measure reaction time: RTT then sits inside the thing
 being measured. Run Round 1 against a local instance on the room's own wifi if the number has
 to mean anything.
+
+### The Root Directory setting will be the thing that breaks it
+
+Vercel's importer offers a Root Directory, and `clients/web` is the obvious-looking answer.
+It is wrong, and it fails in a way that reads as a broken package rather than a misconfigured
+project. The pages import two things from **outside** their own package:
+
+- `clients/sdk/FairDropClient.ts` — the wrapper over the generated bindings
+- `fair-drop-db/spacetimedb/src/pure/inventory.ts` — the admin page previews exactly what
+  `start_countdown` will compute, by calling the module's own arithmetic
+
+Verified by copying `clients/web` into an empty directory and building it: `npm ci` succeeds,
+`vite build` fails on the first import that climbs out of the package.
+
+So the Root Directory is the **repo root**, and `vercel.json` roots the build at `clients/web`
+with `--prefix`. The install is a separate `installCommand` because there is no `package.json`
+at the repo root for Vercel's automatic install to find.
+
+The build-time env is inlined into `buildCommand` as `${VAR:-default}` rather than declared in
+a `build.env` block: `build.env` is no longer in Vercel's supported property list, and a
+silently-dropped `VITE_STDB_URI` does not fail the build — it ships a bundle pointed at
+`localhost:3000`, which on a phone looks exactly like the module being down. The `:-` form
+still lets a Project Settings variable win, so previews can be pointed elsewhere without
+editing this file.
 
 ## Endpoints, and how they are configured
 
@@ -110,7 +134,7 @@ Two hard requirements once the pages are served over HTTPS, both satisfied by th
   browser blocks it as mixed content, and the failure looks exactly like the module being down.
   The SDK derives its socket scheme from `VITE_STDB_URI`, so that value must be `https://`.
 - **`dbName()` must not default to `fairdrop-scratch`** in a deployed build — hence
-  `VITE_STDB_DB` in `netlify.toml`.
+  `VITE_STDB_DB` in `vercel.json`.
 
 ## The one that will bite you: admin identity
 
