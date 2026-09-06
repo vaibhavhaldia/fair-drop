@@ -6,3 +6,4 @@ clients/web/dist/
 .vercel
 .env
 .env.local
+.claude/settings.local.json
