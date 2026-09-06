@@ -140,7 +140,7 @@ anything that must hand back a generated id is a procedure.
 | Name | Kind | Signature |
 |---|---|---|
 | `create_event` | **procedure** | `(name, mode, startTime, config) -> EventId` — `config` carries `slotWindowSeconds` (turn only; `0` takes the 60s default) |
-| `join` | **procedure** | `(eventId, displayName, origin) -> ParticipantId` |
+| `join` | **procedure** | `(eventId, displayName, email, origin) -> ParticipantId` |
 | `start_countdown` | reducer | `(eventId)` — admin only |
 | `submit_bid` | reducer | `(eventId, participantId, slotIndex, price)` |
 | `open_event` | reducer | `(eventId)` — **admin-called in the 4h scope** (designed as scheduled; `countdown_schedule` cut) |
@@ -160,7 +160,7 @@ slot."
 ### SDK surface (`clients/sdk/FairDropClient`)
 
 ```ts
-join(eventId, displayName, origin): Promise<ParticipantId>
+join(eventId, displayName, email, origin): Promise<ParticipantId>
 createEvent(config): Promise<EventId>                  // admin
 startCountdown(eventId): void                          // admin
 submitBid(eventId, participantId, slotIndex, price): void
@@ -202,7 +202,7 @@ the whole transaction, **the last ticket purchase fails**. `close_slot` and `sub
 |---|---|
 | `create_event` | `E_FLOORS_EMPTY` · `E_FLOORS_NOT_INCREASING` · `E_TICKET_PRICE_INVALID` · `E_FRACTION_INVALID` · `E_SLOT_WINDOW_INVALID` |
 | `start_countdown` | `E_NOT_ADMIN` · `E_WRONG_STATE` · `E_NO_PARTICIPANTS` |
-| `join` | `E_EVENT_SETTLED` · `E_HANDLE_COLLISION` *(retryable — pool regenerates the suffix)* |
+| `join` | `E_EVENT_SETTLED` · `E_EMAIL_INVALID` *(human origin only; bots pass `""`)* · `E_HANDLE_COLLISION` *(retryable — pool regenerates the suffix)* |
 | `submit_bid` | `E_EVENT_NOT_OPEN` · `E_UNKNOWN_PARTICIPANT` · `E_WRONG_EVENT` · `E_ALREADY_WON` · `E_STALE_SLOT` · `E_PRICE_MISMATCH` *(turn: `price < slot.floor`)* · `E_INSUFFICIENT_BALANCE` *(turn: `price > walletBalance` — checked against the BID, not the floor)* · `E_SOLD_OUT` · `E_DUPLICATE_ENTRY` |
 | `close_slot` | **throws nothing.** Scheduled reducers have no caller to receive an error, so every guard is a silent `return` that `console.info`s its code. `E_WRONG_STATE` and `E_STALE_TIMER` are observable in `spacetime logs`; `E_SLOT_ALREADY_CLOSED` is **unreachable** (below) |
 

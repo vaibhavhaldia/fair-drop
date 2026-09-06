@@ -40,7 +40,9 @@ function sleep(ms: number): Promise<void> {
 export function toBotClient(client: FairDropClient): BotClient {
   return {
     join(eventId, displayName, origin) {
-      return client.join(eventId, displayName, origin);
+      // Bots have no address. The module takes `''` from a `bot` origin and rejects it from a
+      // `human` one, so this is the one caller that is allowed to pass nothing.
+      return client.join(eventId, displayName, "", origin);
     },
     submitBid(eventId, participantId, slotIndex, price) {
       client.submitBid(eventId, participantId, slotIndex, price);

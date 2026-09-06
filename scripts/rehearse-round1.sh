@@ -59,7 +59,7 @@ q "SELECT admin_identity FROM event WHERE id = $EV" | grep -q '0x' \
 
 HUMANS=""
 for i in $(seq 1 "$H"); do
-  pid=$(spacetime call --server "$SERVER" "$DB" join "$EV" "\"Human-$i\"" '"human"' 2>/dev/null | tr -d '[:space:]')
+  pid=$(spacetime call --server "$SERVER" "$DB" join "$EV" "\"Human-$i\"" "\"human-$i@rehearsal.invalid\"" '"human"' 2>/dev/null | tr -d '[:space:]')
   HUMANS="$HUMANS $pid"
 done
 

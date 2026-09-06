@@ -13,17 +13,30 @@ import type { LiveSource } from "./live.ts";
  * looks exactly like the module being down.
  *
  * `?host=` overrides for the case where the module is not on the same box as the dev server.
+ *
+ * A DEPLOYED build sets `VITE_STDB_URI` (e.g. `https://maincloud.spacetimedb.com`) and that wins
+ * over the LAN guess, which is meaningless once the page is served from Vercel — there is no
+ * SpacetimeDB on port 3000 of `fair-drop.vercel.app`. It must be `https://`, not `http://`:
+ * the SDK derives its WebSocket scheme from this, and an HTTPS page cannot open a plaintext
+ * `ws://` — the browser blocks it as mixed content and the failure looks exactly like the
+ * module being down (DEPLOYMENT.md).
  */
+const ENV = import.meta.env as { VITE_STDB_URI?: string; VITE_STDB_DB?: string };
+
 export function moduleUri(): string {
   const override = new URLSearchParams(location.search).get("host");
   if (override) return override;
+  if (ENV.VITE_STDB_URI) return ENV.VITE_STDB_URI;
   return `${location.protocol}//${location.hostname}:3000`;
 }
 
-/** Database name. `?db=` overrides; `fairdrop-scratch` by default so a stray page load
- *  can never touch `fairdrop-demo`, which holds the rehearsal evidence. */
+/** Database name. `?db=` overrides, then the deployed build's `VITE_STDB_DB`; locally
+ *  `fairdrop-scratch`, so a stray page load can never touch `fairdrop-demo`, which holds the
+ *  rehearsal evidence. */
 export function dbName(): string {
-  return new URLSearchParams(location.search).get("db") ?? "fairdrop-scratch";
+  return (
+    new URLSearchParams(location.search).get("db") ?? ENV.VITE_STDB_DB ?? "fairdrop-scratch"
+  );
 }
 
 /** `?event=<id>` if present. */
@@ -72,6 +85,7 @@ const MESSAGES: Record<string, string> = {
   E_NO_PARTICIPANTS: "Too few participants to fund even one ticket at this fraction.",
   E_FLOORS_NOT_INCREASING: "Floors must strictly increase.",
   E_HANDLE_COLLISION: "Name taken — try another.",
+  E_EMAIL_INVALID: "That email does not look reachable — check it.",
 };
 
 export function errorText(err: unknown): string {

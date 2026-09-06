@@ -58,3 +58,29 @@ th { color: var(--muted); font-weight: 500; font-size: .85rem; }
 
 .err { color: var(--bot); min-height: 1.2rem; font-size: .9rem; }
 .ok { color: var(--human); }
+
+/* The turn-mode explainer. Fixed overlay rather than <dialog>: same result, no ref, and the
+   backdrop looks the same in every browser in the room. */
+.backdrop {
+  position: fixed; inset: 0; z-index: 10; background: rgba(6, 8, 12, .72);
+  display: flex; align-items: center; justify-content: center;
+  padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom));
+}
+/* A tall phone in landscape can be shorter than this content — scroll inside, never off. */
+.modal { max-width: 30rem; width: 100%; max-height: 100%; overflow-y: auto; margin: 0; }
+.steps { margin: 0; padding-left: 1.2rem; }
+.steps li { margin-bottom: .6rem; }
+/* Secondary, and half-height: it sits above the wallet line and must never read as the
+   primary action on the page. */
+button.help { min-height: 2.2rem; padding: .35rem .8rem; margin-top: .8rem; font-size: .9rem; }
+
+/* The event hero. The poster is a fixed 1200x630 crop, so the aspect ratio is declared to
+   reserve its box before the bytes arrive — without it the join form jumps down the page as
+   the image lands, under a finger already moving toward it. */
+.hero { padding-top: .8rem; }
+.hero-img { display: block; width: 100%; height: auto; aspect-ratio: 1200 / 630;
+            object-fit: cover; border-radius: 8px; background: #0c0e12; }
+.hero h2 { color: var(--ink); font-size: 1.05rem; letter-spacing: .02em;
+           text-transform: none; margin-bottom: .2rem; }
+.hero-dates { color: var(--accent); font-size: .9rem; margin: 0 0 .8rem; }
+.hero p { font-size: .95rem; }

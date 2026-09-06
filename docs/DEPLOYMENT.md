@@ -60,22 +60,57 @@ Two things to get right if you do host it:
 - **Logs.** You still need to read the bid-spread line. If you cannot see the driver's stdout,
   you have removed your only view into whether the bots behaved.
 
-## What must change before any of this works off localhost
+## The deployed setup (2026-09-06)
 
-Endpoints are hardcoded to the local instance in four places:
+| Piece | Where | Address |
+|---|---|---|
+| Module | SpacetimeDB Maincloud | `https://maincloud.spacetimedb.com`, database `fairdrop-demo` |
+| Pages | Vercel (static) | project root is the **repo root**, config in `vercel.json` |
+| Bot driver | Wherever you run it | `FAIRDROP_URI=https://maincloud.spacetimedb.com` |
 
-| File | Constant |
-|---|---|
-| `clients/web/src/connect.ts` | `moduleUri()` builds `${location.hostname}:3000` |
-| `clients/bots/src/index.ts` | `SERVER_URI` |
-| `clients/bots/src/turn.ts` | `SERVER_URI` |
-| `clients/bots/src/realClient.ts` | `DEFAULT_URI` |
+```bash
+# module
+spacetime login                      # once
+spacetime publish --server maincloud --module-path fair-drop-db/spacetimedb fairdrop-demo
 
-Two hard requirements once the pages are served over HTTPS:
+# pages
+vercel login                         # once
+vercel deploy --prod                 # from the repo root, reads vercel.json
+
+# bots, against the deployed module — same process model as local, only the URI changes
+cd clients/bots
+FAIRDROP_URI=https://maincloud.spacetimedb.com \
+  node --experimental-strip-types src/turn.ts auto <eventId> fairdrop-demo
+```
+
+**No region control.** Maincloud publishes to one global endpoint; the CLI has no `--region`
+flag and `mumbai.maincloud.spacetimedb.com` does not resolve. So the "put the driver near the
+module" advice above cannot be satisfied by moving the *module* — only by choosing where the
+driver runs, and by accepting that every phone in a Mumbai room is paying transatlantic RTT to
+reach the module. That is fine for turn mode, which resolves on a 45s wall clock, and it is
+**not** fine for a Round 1 that claims to measure reaction time: RTT then sits inside the thing
+being measured. Run Round 1 against a local instance on the room's own wifi if the number has
+to mean anything.
+
+## Endpoints, and how they are configured
+
+Nothing is hardcoded any more. Each side reads its own env:
+
+| Side | Variable | Default when unset |
+|---|---|---|
+| Pages (build-time, Vite) | `VITE_STDB_URI`, `VITE_STDB_DB` | `${location.hostname}:3000`, `fairdrop-scratch` |
+| Bot driver (run-time) | `FAIRDROP_URI`, plus the db name as argv[4] | `http://127.0.0.1:3000`, `fairdrop-scratch` |
+
+`?host=` and `?db=` on the page URL still override the build's values — which is what lets one
+deployed build be pointed at a laptop's local module during a rehearsal.
+
+Two hard requirements once the pages are served over HTTPS, both satisfied by the values above:
 
 - **`wss://`, not `ws://`.** A page served over HTTPS cannot open a plaintext WebSocket; the
   browser blocks it as mixed content, and the failure looks exactly like the module being down.
-- **`dbName()` must not default to `fairdrop-scratch`** in a deployed build.
+  The SDK derives its socket scheme from `VITE_STDB_URI`, so that value must be `https://`.
+- **`dbName()` must not default to `fairdrop-scratch`** in a deployed build — hence
+  `VITE_STDB_DB` in `vercel.json`.
 
 ## The one that will bite you: admin identity
 
@@ -89,3 +124,8 @@ event. Create a fresh one and start over.
 Mitigations, in order of effort: create the event from the same browser profile you will
 present from; or surface the identity in the admin UI with an export/import; or create events
 from the CLI (which runs as the database owner) and use the page as a monitor only.
+
+This bites harder on Maincloud than it did on the laptop, because the CLI and the browser are
+now obviously different identities: an event created with `spacetime call ... create_event` can
+only be locked, opened and settled from the CLI. **Create the demo event from the admin page**,
+in the browser you will present from.

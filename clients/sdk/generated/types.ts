@@ -57,6 +57,7 @@ export const Participant = __t.object("Participant", {
   identity: __t.identity(),
   handle: __t.string(),
   displayName: __t.string(),
+  email: __t.string(),
   origin: __t.string(),
   initialBalance: __t.f64(),
   walletBalance: __t.f64(),

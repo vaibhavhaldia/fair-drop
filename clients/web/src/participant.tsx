@@ -18,6 +18,7 @@ import { createRoot } from "react-dom/client";
 import { dbName, errorCode, errorText, eventIdParam, moduleUri } from "./connect.ts";
 import { useConnection, useEventData, useEventList } from "./useFairDrop.ts";
 import { useSession } from "./session.ts";
+import { EventHero } from "./EventHero.tsx";
 import type { FairDropClient } from "../../sdk/FairDropClient.ts";
 
 // ---------------------------------------------------------------------------------------
@@ -34,13 +35,22 @@ function JoinForm({
   onJoined: (id: bigint) => void;
 }) {
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const join = async () => {
     const trimmed = name.trim();
+    const address = email.trim().toLowerCase();
     if (trimmed === "") {
       setError("Enter a name.");
+      return;
+    }
+    // Checked here as well as in the module for the same reason the bid field is: the module's
+    // E_EMAIL_INVALID is correct but arrives after a round trip, and a typo caught before the
+    // call keeps the person's cursor in the field they need to fix.
+    if (!/^[^\s@,]+@[^\s@,.]+(\.[^\s@,.]+)*\.[a-z]{2,}$/.test(address)) {
+      setError("Enter an email we can reach you on.");
       return;
     }
     setBusy(true);
@@ -48,13 +58,13 @@ function JoinForm({
     try {
       let id: bigint;
       try {
-        id = await client.join(eventId, trimmed, "human");
+        id = await client.join(eventId, trimmed, address, "human");
       } catch (err) {
         // The handle is `<eventId>-<name>-<random 32-bit suffix>`, minted server-side, so a
         // collision means this exact name drew a suffix already taken in this event. Retrying
         // draws a fresh one — it is not a name-is-taken error and must not be shown as one.
         if (errorCode(err) !== "E_HANDLE_COLLISION") throw err;
-        id = await client.join(eventId, trimmed, "human");
+        id = await client.join(eventId, trimmed, address, "human");
       }
       onJoined(id);
     } catch (err) {
@@ -69,15 +79,25 @@ function JoinForm({
       <h2 style={{ marginTop: 0 }}>Join</h2>
       <label htmlFor="name">Your name</label>
       <input
-        id="name" value={name} autoComplete="off" enterKeyHint="go"
+        id="name" value={name} autoComplete="off" enterKeyHint="next"
         onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") document.getElementById("email")?.focus(); }}
+      />
+      <label htmlFor="email">Your email</label>
+      <input
+        id="email" type="email" value={email}
+        autoComplete="email" inputMode="email" enterKeyHint="go"
+        autoCapitalize="off" autoCorrect="off" spellCheck={false}
+        onChange={(e) => setEmail(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") void join(); }}
       />
       <button onClick={() => void join()} disabled={busy}>{busy ? "Joining…" : "Join"}</button>
       {error !== "" && <p className="err">{error}</p>}
       <p className="muted" style={{ marginBottom: 0 }}>
-        You get a wallet with a random balance when you join. Joining late is allowed, but only
-        people who joined before the admin locks inventory are counted in the ticket supply.
+        Your email is how a ticket reaches you after the room empties — it is stored on the
+        event and is not shown on the projector. You get a wallet with a random balance when you
+        join. Joining late is allowed, but only people who joined before the admin locks
+        inventory are counted in the ticket supply.
       </p>
     </div>
   );
@@ -393,6 +413,56 @@ function TurnFlow({
 }
 
 // ---------------------------------------------------------------------------------------
+// "How this works" — the turn-mode explainer
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Turn mode is not a queue, and the whole demo turns on people understanding that before the
+ * first slot closes rather than after. On stage there is no time to explain it twice, and a
+ * paragraph of prose on the bidding card is a paragraph nobody reads against a running clock —
+ * so the explanation lives behind a button, in five short lines, phrased as what to DO.
+ *
+ * Deliberately not a `<dialog>`: `showModal()` needs an imperative ref and gives back a
+ * top-layer element whose backdrop styling varies by browser, for no gain over a fixed overlay
+ * at this size.
+ */
+function TurnHelp({ onClose }: { onClose: () => void }) {
+  // Escape closes it. Phones have no Escape, which is why the backdrop and the button do too.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="backdrop" onClick={onClose}>
+      <div
+        className="modal card" role="dialog" aria-modal="true" aria-labelledby="help-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 id="help-title" style={{ marginTop: 0 }}>How this works</h2>
+        <ol className="steps">
+          <li>Each round has a <strong>floor</strong> — the least you can bid — and a few
+            tickets.</li>
+          <li>Type any amount from the floor up to your wallet, and tap Bid. Being early does
+            not help; the round resolves all at once when the clock hits zero.</li>
+          <li><strong>Nobody sees your bid</strong> — not the other people in the room, not the
+            bots, not the screen.</li>
+          <li>The highest bids take that round's tickets, and a winner pays <strong>their own
+            bid</strong>. Ties go to a published draw, never to who tapped first.</li>
+          <li>Lost the round? Your wallet is untouched. The floor rises and a fresh round
+            starts. Win one and you are done — one ticket each.</li>
+        </ol>
+        <p className="muted" style={{ marginBottom: 0 }}>
+          So the only question you ever answer is: what is this ticket worth to you?
+        </p>
+        <button onClick={onClose}>Got it</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
 
 function MyStatus({
   data,
@@ -403,6 +473,7 @@ function MyStatus({
   participantId: bigint;
   onForget: () => void;
 }) {
+  const [helpOpen, setHelpOpen] = useState(false);
   const me = data.participants.find((p) => p.id === participantId);
   const ev = data.event!;
   if (me == null) {
@@ -422,6 +493,16 @@ function MyStatus({
         <strong>{me.displayName}</strong>
         <span className={`pill ${ev.state}`}>{ev.state}</span>
       </div>
+      {/* Turn mode only. Queue mode is one button labelled Buy — an explainer there would be
+          explaining the thing this demo is trying to show is unremarkable. */}
+      {ev.mode === "turn" && (
+        <>
+          <button className="secondary help" onClick={() => setHelpOpen(true)}>
+            How this works
+          </button>
+          {helpOpen && <TurnHelp onClose={() => setHelpOpen(false)} />}
+        </>
+      )}
       {/* Rendered straight from the subscribed row — never `balance - price` locally. */}
       <p className="muted" style={{ margin: ".5rem 0 0" }}>
         Wallet <strong style={{ color: "var(--ink)" }}>{me.walletBalance}</strong>
@@ -477,11 +558,17 @@ function ParticipantPage() {
   }
 
   if (participantId == null) {
-    return <JoinForm client={client} eventId={eventId} onJoined={remember} />;
+    return (
+      <>
+        <EventHero />
+        <JoinForm client={client} eventId={eventId} onJoined={remember} />
+      </>
+    );
   }
 
   return (
     <>
+      <EventHero />
       <MyStatus data={data} participantId={participantId} onForget={forget} />
       {data.event.mode === "queue" ? (
         <QueueFlow client={client} eventId={eventId} data={data} participantId={participantId} />

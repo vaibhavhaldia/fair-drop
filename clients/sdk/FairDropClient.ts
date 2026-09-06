@@ -99,13 +99,20 @@ export class FairDropClient {
   // Procedures — return values to the caller (CONTRACT §3: "reducers cannot return values").
   // -----------------------------------------------------------------------------------------
 
-  /** `join` — PROCEDURE. Registration is per-event; returns the new row's `ParticipantId`. */
+  /**
+   * `join` — PROCEDURE. Registration is per-event; returns the new row's `ParticipantId`.
+   *
+   * `email` is required by the wire shape and validated by the module, not here (CONTRACT §3
+   * keeps this wrapper logic-free). Bots pass `""`; a human passing an unreachable address is
+   * rejected with `E_EMAIL_INVALID`.
+   */
   async join(
     eventId: EventId,
     displayName: string,
+    email: string,
     origin: "human" | "bot"
   ): Promise<ParticipantId> {
-    return this.connection.procedures.join({ eventId, displayName, origin });
+    return this.connection.procedures.join({ eventId, displayName, email, origin });
   }
 
   /** `create_event` — PROCEDURE, admin-only by construction (creator becomes `adminIdentity`). */

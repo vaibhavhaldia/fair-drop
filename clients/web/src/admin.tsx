@@ -271,6 +271,64 @@ function slotSecondsLeft(endsAt: unknown, _tick: number): number | null {
   return Math.max(0, Math.ceil((Number(raw.microsSinceUnixEpoch / 1000n) - Date.now()) / 1000));
 }
 
+/**
+ * Who won, and how to reach them.
+ *
+ * The projector shows counts; this shows the list an operator actually has to act on after the
+ * room empties. Admin-only by placement, not by permission — the `participant` table is public,
+ * so this is a convenience view over rows any client could read, not a confidentiality boundary
+ * (worth knowing before real addresses are collected on a real event).
+ */
+function Winners({ data }: { data: ReturnType<typeof useEventData> }) {
+  const [copied, setCopied] = useState(false);
+  const rows = data.allocations
+    .slice()
+    .sort((a, b) => a.slotIndex - b.slotIndex)
+    .map((a) => ({ alloc: a, p: data.participants.find((p) => p.id === a.participantId) }))
+    .filter((r) => r.p?.origin === "human");
+
+  if (rows.length === 0) return null;
+
+  // Only the humans have addresses, and only they need mailing — bots hold tickets too, which
+  // is the point of the demo, but there is nobody to send those to.
+  const addresses = rows.map((r) => r.p!.email).filter((e) => e !== "").join(", ");
+
+  return (
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Human winners — {rows.length}</h2>
+      <div className="scroll">
+        <table>
+          <thead><tr><th>Slot</th><th>Name</th><th>Email</th><th>Paid</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={String(r.alloc.participantId)}>
+                <td>{r.alloc.slotIndex}</td>
+                <td>{r.p!.displayName}</td>
+                <td>{r.p!.email === "" ? <span className="muted">—</span> : r.p!.email}</td>
+                <td>{r.alloc.pricePaid}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button
+        className="secondary"
+        disabled={addresses === ""}
+        onClick={() => {
+          // `writeText` needs a secure context; over plain http on the LAN it rejects, and the
+          // operator would be left with a button that silently does nothing.
+          navigator.clipboard?.writeText(addresses).then(
+            () => { setCopied(true); setTimeout(() => setCopied(false), 2000); },
+            () => setCopied(false)
+          );
+        }}
+      >
+        {copied ? "Copied" : "Copy addresses"}
+      </button>
+    </div>
+  );
+}
+
 function Controls({ client, eventId }: { client: FairDropClient; eventId: bigint }) {
   const data = useEventData(client, eventId);
   const [error, setError] = useState("");
@@ -363,6 +421,8 @@ function Controls({ client, eventId }: { client: FairDropClient; eventId: bigint
       <BotPanel
         eventId={ev.id} mode={ev.mode} state={ev.state} humans={humans} bots={bots}
       />
+
+      <Winners data={data} />
 
       {(() => {
         const source = toDisplaySource(data);

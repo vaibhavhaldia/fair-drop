@@ -27,6 +27,7 @@ import { Timestamp } from 'spacetimedb';
 // `draw.ts` already needed the extension for that reason; having only one file carry it was
 // the inconsistency. `allowImportingTsExtensions` in tsconfig.json is what permits this.
 import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory.ts';
+import { isEmail } from './pure/email.ts';
 import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw.ts';
 
 /** Countdown, still 60s (LLD §1a) — and unlike the slot window it binds nothing: the admin
@@ -137,6 +138,9 @@ const participant = table(
     handle: t.string().unique(),
     /** As typed, NOT unique — live audiences collide on names. */
     displayName: t.string(),
+    /** Normalised (trimmed, lowercased) contact address. `''` for bots, which have none.
+     *  NOT unique: one person may join two events, and a household may share an address. */
+    email: t.string(),
     /** `human` | `bot` — first-class, because it drives the dashboard split. */
     origin: t.string(),
     /** The wallet draw as issued. NEVER mutated; the reconciliation anchor (CONTRACT §5). */
@@ -403,10 +407,17 @@ export const createEvent = spacetimedb.procedure(
  * straggler mid-demo.
  */
 export const join = spacetimedb.procedure(
-  { eventId: t.u64(), displayName: t.string(), origin: t.string() },
+  { eventId: t.u64(), displayName: t.string(), email: t.string(), origin: t.string() },
   t.u64(),
-  (ctx, { eventId, displayName, origin }) => {
+  (ctx, { eventId, displayName, email, origin }) => {
     if (origin !== 'human' && origin !== 'bot') throw new SenderError('E_ORIGIN_INVALID');
+
+    // Normalised HERE, not on the client: the bot driver, the CLI and the browser all call this
+    // procedure, and a row's address has to mean the same thing whichever one wrote it.
+    const contact = email.trim().toLowerCase();
+    // Bots have no address and must not be forced to invent one; a human without a valid one is
+    // rejected, because the address is the only way to reach a winner after the room empties.
+    if (origin === 'human' && !isEmail(contact)) throw new SenderError('E_EMAIL_INVALID');
 
     return ctx.withTx((tx: any) => {
       const ev = tx.db.event.id.find(eventId);
@@ -440,6 +451,7 @@ export const join = spacetimedb.procedure(
         identity: ctx.sender,
         handle,
         displayName,
+        email: contact,
         origin,
         initialBalance: draw,
         walletBalance: draw,
