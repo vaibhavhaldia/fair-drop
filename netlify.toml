@@ -1,0 +1,29 @@
+# Netlify builds the static pages. There is no server side to this app: the browser opens a
+# WebSocket straight to SpacetimeDB, so this host serves files and nothing else.
+
+[build]
+  # The repo root, NOT clients/web. The pages import two things from outside their own package
+  # — clients/sdk (the wrapper over the generated bindings) and the module's pure inventory.ts,
+  # which the admin page calls to preview exactly what start_countdown will compute. A build
+  # rooted at clients/web cannot see either.
+  base = "."
+  publish = "clients/web/dist"
+  # The install is folded in: there is no package.json at the repo root, so Netlify's automatic
+  # dependency install finds nothing to do and the build would reach vite with no node_modules.
+  command = "npm --prefix clients/web ci && npm --prefix clients/web run build"
+
+[build.environment]
+  # Baked into the bundle at build time. https, never http: the SDK derives its WebSocket scheme
+  # from this, and an HTTPS page cannot open a plaintext ws:// — the browser blocks it as mixed
+  # content and the failure looks exactly like the module being down.
+  VITE_STDB_URI = "https://maincloud.spacetimedb.com"
+  # Never fairdrop-scratch in a deployed build.
+  VITE_STDB_DB = "fairdrop-demo"
+  NODE_VERSION = "22"
+
+# The admin console is a second entry point, not a route. 200 rather than 301 so the URL the
+# operator has open on stage stays /admin.
+[[redirects]]
+  from = "/admin"
+  to = "/admin.html"
+  status = 200

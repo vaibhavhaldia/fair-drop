@@ -11,7 +11,7 @@ Three processes, and **all three are outbound clients**. Nothing accepts an inbo
 phones / laptops ──wss──►                            ◄──wss── bot driver
                             SpacetimeDB                        (laptop or hosted)
 static React pages ──wss──►  (Maincloud, or local)
-   (Vercel, or vite)
+   (Netlify, or vite)
 ```
 
 The React pages are static files. There is no application server, no API, no session store —
@@ -65,7 +65,7 @@ Two things to get right if you do host it:
 | Piece | Where | Address |
 |---|---|---|
 | Module | SpacetimeDB Maincloud | `https://maincloud.spacetimedb.com`, database `fairdrop-demo` |
-| Pages | Vercel (static) | project root is the **repo root**, config in `vercel.json` |
+| Pages | Netlify (static) | build base is the **repo root**, config in `netlify.toml` |
 | Bot driver | Wherever you run it | `FAIRDROP_URI=https://maincloud.spacetimedb.com` |
 
 ```bash
@@ -74,8 +74,8 @@ spacetime login                      # once
 spacetime publish --server maincloud --module-path fair-drop-db/spacetimedb fairdrop-demo
 
 # pages
-vercel login                         # once
-vercel deploy --prod                 # from the repo root, reads vercel.json
+netlify login                        # once (or export NETLIFY_AUTH_TOKEN)
+netlify deploy --prod                # from the repo root, reads netlify.toml
 
 # bots, against the deployed module — same process model as local, only the URI changes
 cd clients/bots
@@ -110,7 +110,7 @@ Two hard requirements once the pages are served over HTTPS, both satisfied by th
   browser blocks it as mixed content, and the failure looks exactly like the module being down.
   The SDK derives its socket scheme from `VITE_STDB_URI`, so that value must be `https://`.
 - **`dbName()` must not default to `fairdrop-scratch`** in a deployed build — hence
-  `VITE_STDB_DB` in `vercel.json`.
+  `VITE_STDB_DB` in `netlify.toml`.
 
 ## The one that will bite you: admin identity
 
