@@ -24,6 +24,7 @@ export default __t.row({
   startTime: __t.timestamp().name("start_time"),
   endTime: __t.option(__t.timestamp()).name("end_time"),
   ticketPrice: __t.option(__t.f64()).name("ticket_price"),
+  slotWindowSeconds: __t.u32().name("slot_window_seconds"),
   currentSlotIndex: __t.u32().name("current_slot_index"),
   currentSlotEndsAt: __t.option(__t.timestamp()).name("current_slot_ends_at"),
 });

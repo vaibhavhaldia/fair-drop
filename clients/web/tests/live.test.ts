@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { mountLive, type LiveSource, type MountNode } from "../src/live.ts";
-import type { EventRow, ParticipantRow, AllocationRow } from "../src/deriveDisplayModel.ts";
+import type {
+  EventRow,
+  ParticipantRow,
+  AllocationRow,
+  SlotRow,
+} from "../src/deriveDisplayModel.ts";
 
 /**
  * A fake `LiveSource` that captures the `subscribeEvent`/`subscribeAllocations` callbacks so
@@ -11,17 +16,20 @@ function fakeSource(initial: {
   event: EventRow;
   participants: ParticipantRow[];
   allocations: AllocationRow[];
+  slots?: SlotRow[];
 }) {
   let event = initial.event;
   const allocations = [...initial.allocations];
+  let slots = [...(initial.slots ?? [])];
   const eventCbs: Array<(e: EventRow) => void> = [];
   const allocationCbs: Array<(a: AllocationRow) => void> = [];
+  const slotCbs: Array<(s: SlotRow) => void> = [];
 
   const source: LiveSource = {
     listEvents: () => [event],
     listParticipants: () => initial.participants,
     listAllocations: () => allocations,
-    listSlots: () => [],
+    listSlots: () => slots,
     subscribeEvent: (_eventId, cb) => {
       eventCbs.push(cb);
       return () => {
@@ -37,6 +45,13 @@ function fakeSource(initial: {
       };
     },
     subscribeSlotResults: () => () => {},
+    subscribeSlots: (_eventId, cb) => {
+      slotCbs.push(cb);
+      return () => {
+        const i = slotCbs.indexOf(cb);
+        if (i >= 0) slotCbs.splice(i, 1);
+      };
+    },
   };
 
   /** Simulate a new `Allocation` row landing and firing every registered callback. */
@@ -46,7 +61,16 @@ function fakeSource(initial: {
     for (const cb of allocationCbs) cb(a);
   };
 
-  return { source, pushAllocation };
+  /** Simulate `submit_bid` bumping a live `Slot` row's `entriesReceived` mid-window. */
+  const bumpSlotEntries = (slotIndex: number) => {
+    slots = slots.map((s) =>
+      s.slotIndex === slotIndex ? { ...s, entriesReceived: s.entriesReceived + 1 } : s
+    );
+    const row = slots.find((s) => s.slotIndex === slotIndex);
+    if (row != null) for (const cb of slotCbs) cb(row);
+  };
+
+  return { source, pushAllocation, bumpSlotEntries };
 }
 
 // TC-SDK-04 (adapted: subscribeEvent/subscribeAllocations invoking their callback and driving
@@ -113,6 +137,76 @@ describe("mountLive — display updates from subscriptions without a refresh", (
 
     const htmlAfterUnsubscribe = mount.innerHTML;
     pushAllocation({ eventId: 1n, participantId: 1n, slotIndex: 0, pricePaid: 15000 });
+    expect(mount.innerHTML).toBe(htmlAfterUnsubscribe);
+  });
+});
+
+// Turn mode: `Slot.entriesReceived` is bumped on every `submit_bid` during the 60s window,
+// while `Allocation` rows are written only at `close_slot`. Subscribing to event/allocation/
+// slot_result alone therefore leaves the "Entries" and "Oversubscription" columns frozen at 0
+// for the whole window and jumping at close — the field piling into the slot is exactly what
+// the projector should show while it happens. Same additive rationale `listSlots` already
+// carries (CONTRACT.md §11).
+describe("mountLive — the slot window updates live, not only at close", () => {
+  it("re-renders when a Slot row's entriesReceived changes with no allocation yet", () => {
+    const { source, bumpSlotEntries } = fakeSource({
+      event: {
+        id: 1n,
+        mode: "turn",
+        state: "open",
+        totalTickets: 16,
+        ticketsRemaining: 16,
+        participantsAtOpen: 40,
+        ticketPrice: 15000,
+      },
+      participants: [{ id: 1n, eventId: 1n, origin: "human" }],
+      allocations: [],
+      slots: [
+        { eventId: 1n, slotIndex: 0, floor: 10000, effectiveQuota: 4, entriesReceived: 0, filled: 0 },
+      ],
+    });
+
+    const mount: MountNode = { innerHTML: "" };
+    const unsubscribe = mountLive(mount, source, 1n);
+
+    const initialHtml = mount.innerHTML;
+    expect(initialHtml).toContain("<td>0</td>"); // entries start at 0
+
+    bumpSlotEntries(0);
+    const afterFirst = mount.innerHTML;
+    expect(afterFirst).not.toBe(initialHtml);
+    expect(afterFirst).toContain("0.3x"); // 1 / quota 4, live, before any allocation lands
+
+    bumpSlotEntries(0);
+    expect(mount.innerHTML).not.toBe(afterFirst); // not a one-shot re-render
+
+    unsubscribe();
+  });
+
+  it("stops updating on slot changes once unsubscribed", () => {
+    const { source, bumpSlotEntries } = fakeSource({
+      event: {
+        id: 1n,
+        mode: "turn",
+        state: "open",
+        totalTickets: 16,
+        ticketsRemaining: 16,
+        participantsAtOpen: 40,
+        ticketPrice: 15000,
+      },
+      participants: [{ id: 1n, eventId: 1n, origin: "human" }],
+      allocations: [],
+      slots: [
+        { eventId: 1n, slotIndex: 0, floor: 10000, effectiveQuota: 4, entriesReceived: 0, filled: 0 },
+      ],
+    });
+
+    const mount: MountNode = { innerHTML: "" };
+    const unsubscribe = mountLive(mount, source, 1n);
+    unsubscribe();
+
+    const htmlAfterUnsubscribe = mount.innerHTML;
+    bumpSlotEntries(0);
     expect(mount.innerHTML).toBe(htmlAfterUnsubscribe);
   });
 });

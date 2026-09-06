@@ -13,6 +13,7 @@ import {
 export const params = {
   eventId: __t.u64(),
   displayName: __t.string(),
+  email: __t.string(),
   origin: __t.string(),
 };
 export const returnType = __t.u64()

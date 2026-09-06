@@ -8,7 +8,9 @@
     "lib": ["ES2021", "dom"],
     "module": "ESNext",
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "types": ["vite/client", "node"]
   },
   "include": ["src/**/*", "tests/**/*"],
   "exclude": ["node_modules"]

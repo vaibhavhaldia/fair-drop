@@ -16,6 +16,7 @@ export default __t.row({
   identity: __t.identity(),
   handle: __t.string(),
   displayName: __t.string().name("display_name"),
+  email: __t.string(),
   origin: __t.string(),
   initialBalance: __t.f64().name("initial_balance"),
   walletBalance: __t.f64().name("wallet_balance"),

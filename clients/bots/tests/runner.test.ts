@@ -6,37 +6,54 @@ import { fileURLToPath } from "node:url";
 // TC-JOIN-12 (adapted: the retryable-collision contract, exercised against a mock client
 // rather than a live join — the live-registration count assertion is Gate 2/IT scope).
 describe("TC-JOIN-12 — E_HANDLE_COLLISION is retryable, not fatal", () => {
-  it("regenerates the handle suffix and retries until join succeeds", async () => {
+  // The error carriers below are the ones the REAL transport produces, not a fabricated
+  // `err.code`. `join` is a procedure, and `spacetimedb`'s SDK rejects a failed procedure call
+  // with the raw `ProcedureStatus::InternalError` payload — a plain string (db_connection_impl
+  // `#callProcedure`: `reject(result.value)`, where `ProcedureStatus` is
+  // `Returned: byteArray | InternalError: string`). Reducers reject with a `SenderError`, an
+  // `Error` carrying the code in `.message` only. Neither has a `.code` property, so a test
+  // that constructs one is only agreeing with itself.
+  function collisionJoin(failures: number, makeErr: () => unknown) {
     let attempts = 0;
     const client: BotClient = {
       join: vi.fn(async () => {
         attempts += 1;
-        if (attempts < 3) {
-          const err = new Error("collision") as Error & { code: string };
-          err.code = "E_HANDLE_COLLISION";
-          throw err;
-        }
+        if (attempts <= failures) throw makeErr();
         return 42n;
       }),
       submitBid: vi.fn(),
     };
+    return { client, attempts: () => attempts };
+  }
 
-    const id = await joinBotWithRetry(client, 1n);
-    expect(id).toBe(42n);
-    expect(attempts).toBe(3);
+  it("retries when the procedure rejects with the bare code string (real transport shape)", async () => {
+    const { client, attempts } = collisionJoin(2, () => "E_HANDLE_COLLISION");
+    await expect(joinBotWithRetry(client, 1n)).resolves.toBe(42n);
+    expect(attempts()).toBe(3);
+  });
+
+  it("retries when the rejection string wraps the code in host framing", async () => {
+    const { client, attempts } = collisionJoin(1, () => "Error: E_HANDLE_COLLISION\n  at join");
+    await expect(joinBotWithRetry(client, 1n)).resolves.toBe(42n);
+    expect(attempts()).toBe(2);
+  });
+
+  it("retries when an Error carries the code in its message (SenderError shape)", async () => {
+    const { client, attempts } = collisionJoin(2, () => new Error("E_HANDLE_COLLISION"));
+    await expect(joinBotWithRetry(client, 1n)).resolves.toBe(42n);
+    expect(attempts()).toBe(3);
   });
 
   it("swallows every other join error and gives up without throwing", async () => {
     const client: BotClient = {
       join: vi.fn(async () => {
-        const err = new Error("settled") as Error & { code: string };
-        err.code = "E_EVENT_SETTLED";
-        throw err;
+        throw "E_EVENT_SETTLED";
       }),
       submitBid: vi.fn(),
     };
 
     await expect(joinBotWithRetry(client, 1n)).resolves.toBeUndefined();
+    expect(client.join).toHaveBeenCalledTimes(1); // no retry loop on a non-collision code
   });
 });
 

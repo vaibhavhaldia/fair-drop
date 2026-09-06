@@ -43,7 +43,7 @@ value and the committed row are what count. Do not read that line as a failure.
 ## Queue mode — allocation on arrival
 
 ```bash
-spacetime call --server local $DB create_event '"manual-queue"' '"queue"' '0.40' '15000' '[]'
+spacetime call --server local $DB create_event '"manual-queue"' '"queue"' '0.40' '15000' '[]' '0'
 ```
 
 Arguments are `name, mode, ticketFraction, ticketPrice, floors`. There is no `totalTickets`
@@ -111,7 +111,7 @@ route was closed on 2026-09-06 (TC-EVT-12). Before that fix, `size_inventory` gu
 opened a dead event:
 
 ```bash
-EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]')
+EV=$(spacetime call --server local $DB create_event '"zero-inv"' '"queue"' '0.40' '15000' '[]' '0')
 PID=$(spacetime call --server local $DB join "$EV" '"Solo"' '"human"')
 spacetime call --server local $DB start_countdown "$EV"   # totalTickets = 0, no error
 spacetime call --server local $DB open_event "$EV"
@@ -127,11 +127,11 @@ spacetime call --server local $DB submit_bid "$EV" "$PID" '0' '15000'   # -> E_S
 ## Turn mode — allocation deferred to the draw
 
 ```bash
-spacetime call --server local $DB create_event '"manual-turn"' '"turn"' '0.40' '0' '[25000,30000,40000]'
+spacetime call --server local $DB create_event '"manual-turn"' '"turn"' '0.40' '0' '[25000,30000,40000]' '10'
 ```
 
 Floors must **strictly increase** or you get `E_FLOORS_NOT_INCREASING`. This is a rejection rather
-than a warning on purpose: under pay-the-floor, a later slot that is cheaper than an earlier one
+than a warning on purpose: a later slot that is cheaper than an earlier one
 means every remaining participant would rationally skip ahead to it, which dismantles the
 mechanism the demo exists to show. `ticketPrice` is unused in turn mode — pass `0`.
 
@@ -220,7 +220,8 @@ sender guard here and has no second line of defence if a version bump ever revok
 |---|---|---|
 | same participant, same slot, twice | `E_DUPLICATE_ENTRY` | C2 — check-then-insert, safe only because reducers serialize |
 | slotIndex `1` while slot 0 is current | `E_STALE_SLOT` | Entries land in the open slot or nowhere |
-| price `26000` on a 25000 floor | `E_PRICE_MISMATCH` | There is no amount to choose, for anyone |
+| price `24999` on a 25000 floor | `E_PRICE_MISMATCH` | The floor is a minimum — bidding under it is the error, bidding over it is the mechanism |
+| price above your wallet | `E_INSUFFICIENT_BALANCE` | v4 checks the wallet against the BID, not the floor |
 | a participant whose wallet < floor | `E_INSUFFICIENT_BALANCE` | The field thins as floors rise — this is the finding, not a bug |
 
 All four verified live on 2026-09-06. `E_INSUFFICIENT_BALANCE` needs no setup: wallets are drawn

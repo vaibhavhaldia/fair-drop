@@ -9,6 +9,7 @@
 // stays trivial (task file: "Do not add strategy; its absence is the finding, not a gap").
 
 import { queueDelayMs } from "./decide.ts";
+import { botBidCeiling } from "./config.ts";
 import { joinBotWithRetry, runOneTurnBotSlot, type BotClient } from "./runner.ts";
 
 /**
@@ -53,7 +54,10 @@ export async function runOneTurnBot(
   opts: TurnBotOpts = {}
 ): Promise<void> {
   const pollMs = opts.pollMs ?? 25;
-  const deadline = Date.now() + (opts.timeoutMs ?? 10 * 60_000);
+  // Leak guard, not a real limit — same reasoning as `realClient.ts`'s OPEN_TIMEOUT_MS. It was
+  // 10 min, which silently assumed the module's old fixed 60s slot: `event.slotWindowSeconds` is
+  // now chosen per event and may be up to 600s, so five slots can legitimately outlive that.
+  const deadline = Date.now() + (opts.timeoutMs ?? 60 * 60_000);
   const acted = new Set<number>();
 
   while (Date.now() < deadline) {
@@ -82,6 +86,9 @@ export async function runOneTurnBot(
             hasWon: fresh.hasWon,
             walletBalance: fresh.walletBalance,
             floor: slot.floor,
+            // Every bot in the fleet shares one resale view, because they are modelling one
+            // secondary market — not 400 independent opinions about what the ticket is worth.
+            ceiling: botBidCeiling(),
           });
         }
       }

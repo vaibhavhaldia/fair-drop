@@ -39,8 +39,10 @@ review (2026-09-05).
 - Unsold quota in a slot **rolls forward** into the next slot's quota (§3).
 - A participant may win **at most one ticket per event** (C5) — this replaces v2's multi-win
   allowance and inverts the tests that asserted it.
-- Turn-mode clearing is **random among qualifying entries, pay-the-floor** — not
-  price-descending pay-as-bid. See HLD §5a for the simulation evidence.
+- Turn-mode clearing is **blind bidding, resolved in decreasing price order, pay-your-bid**
+  (v4). The floor is a MINIMUM, not the price; ties within a price are broken by the seeded
+  hash draw. v3's random-among-qualifying pay-the-floor rule is superseded — see HLD §5b for
+  why (§5a modelled bots as rich fans, so it could not see the resale ceiling).
 - `totalTickets` is **derived from turnout** (40% of registered participants) at
   `start_countdown`, not supplied at `create_event`.
 
@@ -144,7 +146,7 @@ Bid {                          // "entry" in turn mode — the name is kept for 
                                 // submit_bid's queue branch allocates directly (§2), and the
                                 // Allocation row is the record.
   participantId: ParticipantId // FK, indexed
-  price: number                // turn mode: must equal slot.floor (there is no bid amount to
+  price: number                // turn mode: the bidder's own sealed amount, >= slot.floor and
                                 // choose — an entry is an opt-in at the posted price)
   qty: u32                     // fixed at 1 for this build — see §1b
   seq: u64                     // server-assigned arrival sequence, retained for audit only —
@@ -220,7 +222,7 @@ turnout-independent or derived from turnout at runtime.
 | `slots[].floor` | ₹15,000 / 22,000 / 30,000 / 40,000 / 55,000 | Strictly increasing (enforced). Under pay-the-floor every floor binds by construction — the clearing price of slot *k* *is* `floor[k]`. Tuned so the top floor sits well inside the wallet distribution: at ₹55,000, ~73% of the wallet range still qualifies, keeping the last slot genuinely contested rather than empty. |
 | `ticketPrice` (queue mode) | ₹15,000 | Equal to Slot 1's floor, so Round 1 and Round 2 start from the same face value — the only variable that changes between rounds is the clearing rule. |
 | `walletBalance` (both origins) | `randomUniform(₹20,000, ₹1,50,000)` at join | Replaces v2's flat ₹5,00,000. A flat balance means nobody ever drops out and willingness-to-pay carries no information. The random draw produces a genuine dropout curve as floors rise. Minimum (₹20,000) sits above Slot 1's floor so everyone can contest the first slot; maximum (₹1,50,000) sits well above the top floor so the last slot has a real field. Bots draw from the identical distribution — a bot's win is wallet-backed, not free. |
-| Turn-mode entry | Opt-in at `slot.floor`; no amount to choose | Under a draw at a posted price there is no bid amount, for humans or bots. See §5. |
+| Turn-mode entry | A sealed bid `>= slot.floor`, capped by the wallet | v4: the slot resolves in decreasing order and winners pay their own bid. Bots bid `resale x (1 - margin)` capped by wallet (`clients/bots/src/config.ts`); fans bid what the event is worth to them. See HLD §5b. |
 | Bot reaction delay δ (queue) | **`U(0, 500ms)`** — δ is the *bound*, not the delay | Every bot draws its **own** delay uniformly on `[0, 500ms]`, independently, each run. Some land near-instant, some near the full 500ms; the mean is **250ms** and the max is 500ms. It is never a fixed 500ms for all bots — that would make them a synchronised block rather than a realistic field. So the *average* bot reacts in 250ms — comparable to a **best-case human** reaction time, and slower than many. This is a deliberate handicap and it is what makes Round 1's result honest: a skeptic cannot say "you set the bots to zero." They still take essentially all inventory, because there are 40 of them, they are consistent, and a real human tapping a phone lands 1–2s out. The finding is that you do not need superhuman speed to win FCFS — you only need to be *reliably slightly faster*, at scale. δ is a named config constant (TC-POOL-09), not a literal. |
 | Countdown / slot window | 60s each | Long enough to read on a projector, short enough for a 5-slot event inside a demo slot. |
 
@@ -237,7 +239,7 @@ advantage, not bot participation. The claim is proportionality, not exclusion.
   Multi-ticket demand ("declare how many you want upfront") was considered and **deferred**:
   it turns the allocator from unit-demand into multi-unit demand and changes the wallet guard
   to `qty × floor`. Not in the MVP.
-- Turn-mode rule is fixed to **random-among-qualifying, pay-the-floor** (HLD §5a). The
+- Turn-mode rule is fixed to **blind bid, decreasing order, pay-your-bid** (HLD §5b). The
   price-descending pay-as-bid comparator survives only inside the experiment runner (§10) as
   the comparison arm that produces HLD §5a's table — it is not a production code path.
 - `Participant.ceiling` is **deleted**. It existed to cap bot bids below a flat ₹5,00,000
@@ -858,7 +860,7 @@ why the two live in different functions.
 | | `E_WRONG_EVENT` | `participant.eventId != event_id` |
 | | `E_ALREADY_WON` | C5 |
 | | `E_STALE_SLOT` | `slot_index != event.currentSlotIndex` |
-| | `E_PRICE_MISMATCH` | `price != ticketPrice` (queue) / `!= slot.floor` (turn) |
+| | `E_PRICE_MISMATCH` | `price != ticketPrice` (queue) / `price < slot.floor` (turn) |
 | | `E_INSUFFICIENT_BALANCE` | wallet below the price |
 | | `E_SOLD_OUT` | queue mode, `ticketsRemaining == 0` |
 | | `E_DUPLICATE_ENTRY` | C2 — an entry already exists for this participant in this slot |

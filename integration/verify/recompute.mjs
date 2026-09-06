@@ -11,7 +11,12 @@
  *
  * Usage — recompute a slot's winners from published state:
  *   node integration/verify/recompute.mjs \
- *     --seed <drawSeed> --quota <effectiveQuota> --ids 1000,1007,1014,...
+ *     --seed <drawSeed> --quota <effectiveQuota> --ids 1000:41200,1007:91000,...
+ *
+ * Each entry is `<bid id>:<bid price>`. Slots resolve in DECREASING price order, and the hash
+ * below orders the entries WITHIN a price tier — so a verifier needs both numbers, and both
+ * are public in `bid`. A bare id (no `:price`) is read as price 0, which puts every entry in
+ * one tier and reproduces the pre-v4 hash-only ranking.
  *
  * Usage — independently re-derive the seed the module published:
  *   node integration/verify/recompute.mjs \
@@ -21,7 +26,7 @@
  *   spacetime sql --server local fairdrop \
  *     "SELECT slotIndex, drawSeed, allocated FROM slot_result"
  *   spacetime sql --server local fairdrop \
- *     "SELECT id, participantId FROM bid WHERE eventId = 1 AND slotIndex = 0"
+ *     "SELECT id, participantId, price FROM bid WHERE eventId = 1 AND slotIndex = 0"
  */
 
 const MASK = 0xffffffffffffffffn;
@@ -57,10 +62,15 @@ const deriveSeed = (eventId, slotIndex, ids) =>
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Rank by hash(seed, id) ascending, ties on id ascending. */
-function rank(seed, ids) {
-  return ids
-    .map(id => ({ id, key: digest64(`${seed}:${id}`) }))
-    .sort((a, b) => (a.key !== b.key ? cmp(a.key, b.key) : cmp(a.id, b.id)))
+function rank(seed, entries) {
+  return entries
+    .map(e => ({ ...e, key: digest64(`${seed}:${e.id}`) }))
+    .sort((a, b) =>
+      a.price !== b.price
+        ? (a.price > b.price ? -1 : 1)          // highest bid first
+        : a.key !== b.key
+          ? cmp(a.key, b.key)                   // then the draw, within the tier
+          : cmp(a.id, b.id))
     .map(e => e.id);
 }
 
@@ -76,7 +86,11 @@ if (!args.ids) {
   process.exit(2);
 }
 
-const ids = args.ids.split(',').map(s => BigInt(s.trim()));
+const entries = args.ids.split(',').map(spec => {
+  const [id, price] = spec.trim().split(':');
+  return { id: BigInt(id), price: Number(price ?? 0) };
+});
+const ids = entries.map(e => e.id);
 
 if (args.event !== undefined && args.slot !== undefined) {
   const seed = deriveSeed(BigInt(args.event), Number(args.slot), ids);
@@ -93,10 +107,14 @@ if (args.event !== undefined && args.slot !== undefined) {
 
 const seed = args.seed ?? deriveSeed(BigInt(args.event ?? 0), Number(args.slot ?? 0), ids);
 const quota = Number(args.quota ?? ids.length);
-const winners = rank(seed, ids).slice(0, quota);
+const winners = rank(seed, entries).slice(0, quota);
+const cutoff = winners.length
+  ? entries.find(e => e.id === winners[winners.length - 1]).price
+  : null;
 
 console.log(`\nseed   ${seed}`);
 console.log(`quota  ${quota} of ${ids.length} entries\n`);
 console.log('winners, in the order the draw ranked them:');
 for (const [i, id] of winners.entries()) console.log(`  ${String(i + 1).padStart(3)}. bid ${id}`);
+if (cutoff !== null) console.log(`\ncutoff (lowest winning bid): ${cutoff}`);
 if (winners.length < quota) console.log(`\nunfilled: ${quota - winners.length} (rolls forward)`);

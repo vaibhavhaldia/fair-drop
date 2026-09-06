@@ -19,8 +19,30 @@ export interface BotClient {
   waitForOpen?(eventId: bigint): Promise<void>;
 }
 
+/**
+ * Does `err` carry `code`? Matches on the error's *text*, because that is the only carrier the
+ * real transport has. `join` is a procedure, and the SpacetimeDB SDK rejects a failed procedure
+ * call with the raw `ProcedureStatus::InternalError` payload — a plain **string** — while
+ * reducers reject with a `SenderError`, an `Error` whose only carrier is `.message`. Neither
+ * has a `.code` property: an `err.code === "E_HANDLE_COLLISION"` check can never fire in
+ * production, so the retry below would be dead code (module `index.ts`'s join comment —
+ * "a bot pool matching on the documented code would never match" — is the reason the module
+ * throws the documented code itself; matching it here is the other half of that).
+ *
+ * Substring, not equality: the host may frame the thrown code (`"Error: E_HANDLE_COLLISION\n
+ * at ..."`). The codes in CONTRACT.md §9 are distinct `E_`-prefixed tokens, so a substring hit
+ * is unambiguous.
+ */
 function hasCode(err: unknown, code: string): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
+  const text =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : typeof err === "object" && err !== null
+          ? String((err as { message?: unknown }).message ?? "")
+          : "";
+  return text.includes(code);
 }
 
 /** `Bot-<random>` display name, per join's handle scheme (CONTRACT.md §2). */
@@ -64,7 +86,14 @@ async function runOneQueueBot(
   if (participantId === undefined) return;
 
   if (client.waitForOpen) {
-    await client.waitForOpen(eventId);
+    try {
+      await client.waitForOpen(eventId);
+    } catch {
+      // A bot that gave up waiting drops out quietly. It must NOT propagate: every bot runs
+      // inside one `Promise.all`, so a single rejection would abort every other bot mid-flight
+      // — turning one slow start into a dead round. Dropping out costs one bot.
+      return;
+    }
   }
 
   await sleep(queueDelayMs()); // independent per-bot draw on [0, DELTA_MS] — never fixed

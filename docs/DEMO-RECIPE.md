@@ -164,6 +164,11 @@ only your word for it.
 
 🎤 *"Same people. Same tickets. Same wallets. One thing changes: the rule."*
 
+> **The v4 rule, in one line for the stage:** each slot is a sealed bid at or above the posted
+> floor; when the clock runs out the highest bids take the tickets and each winner pays what
+> they bid. A fan bids what the night is worth to them. A reseller cannot bid past what they can
+> resell it for — so the expensive slots are the ones where fans stop having competition.
+
 ### 2.1 Arrange
 
 | | |
@@ -184,11 +189,13 @@ only your word for it.
 |---|---|
 | **Act** | `start_countdown`, then `open_event` |
 | **C** ✅ | `sum(baseQuota) == totalTickets == 2H`; at H=10 that is 20 → quotas `4,4,4,4,4`. At H=8 it is 16 → `4,3,3,3,3`, remainder to the **earliest** slots · **TC-EVT-09/11/16** |
-| **Act** | Slot opens 60s. Enter **at second ~55** — deliberately last. 🎤 *"I'm entering last, on purpose."* |
+| **Act** | Slot opens for `slotWindowSeconds` (60 on stage). Bid **at second ~55** — deliberately last. 🎤 *"I'm bidding last, on purpose. It changes nothing."* |
+| **Act** | Bid **above the floor** on a phone, and say why: the floor is a minimum, the bid is sealed, and a winner pays their own number |
 | **C** ✅ | No entry count or other participant's entry visible before close · **TC-UI-11** |
 | **Act** | Slot closes automatically via `slot_schedule` |
-| **C** ✅ | One `slot_result` row: `clearingPrice == slot.floor`, `allocated <= effectiveQuota` · **TC-CLR-01** |
-| **C** ✅ | Every winner in the slot paid **exactly** that floor · **TC-CLR-03** |
+| **C** ✅ | One `slot_result` row: `cutoffPrice == the lowest winning bid`, `allocated <= effectiveQuota` · **TC-CLR-01, TC-CLR-05** |
+| **C** ✅ | Every winner paid **their own bid**; no losing bid sits above the cutoff · **TC-CLR-16** |
+| **C** 👀 | Slots 3 and 4 (floors 40k, 55k): **the bots are gone.** A reseller's ceiling is `resale x (1 - margin)` = ₹30,000, so those floors are above what the ticket is worth to them. This is the demo's whole argument — say it out loud · **HLD §5b** |
 | **C** ✅ | `baseQuota` **unchanged** by the close — rollover writes to `effectiveQuota` only · **TC-EVT-09** |
 | **C** 👀 | `effectiveQuota == baseQuota` on every slot. **Expect no rollover — that is correct, not a failure.** See the box below |
 | **C** 👀 | Eligible field visibly shrinks as floors rise past wallets — the visual drama |
@@ -205,7 +212,9 @@ only your word for it.
 > floor around **₹1,30,000** — and at that point tickets start going **unsold** (19.6 of 20 at
 > ₹1.3L, 16 of 20 at ₹1.5L), because the last slot cannot fill and there is nowhere left to
 > roll. **Rollover firing and "the event sells out" are mutually exclusive at five slots**, and
-> Stage 2.3 asserts the sell-out. Raising the floor also pushes average price paid from
+> Stage 2.3 asserted the sell-out through v3. *(v4: it no longer does — see the TC-DASH-01 row
+> above. Under blind bidding an unsold top slot is expected, so rollover CAN now fire on a
+> normal run, and it is not a failure when it does.)* Raising the floor also pushes average price paid from
 > ₹32,400 toward ₹45,000 against a ₹15,000 face value — reintroducing exactly the markup
 > HLD §5a rejected pay-as-bid for.
 >
@@ -222,7 +231,8 @@ only your word for it.
 | **C** 👀 | Human share ≈ 20% ± 6pp at H=10. Treat the band as context, **not** a pass/fail gate — `0.4H` winners out of `2H` tickets has real variance, and a run landing at 2 or 6 is the mechanism working, not a bug |
 | **C** ✅ | Entering at second 55 did not hurt you · **TC-INV-05** |
 | **C** ✅ | A slot-1 winner is rejected in slots 2–5 with `E_ALREADY_WON` · **TC-INV-10** |
-| **C** ✅ | `sum(allocation) == 2H`; `ticketsRemaining == 0`; `state == "settled"` · **TC-DASH-01** |
+| **C** ✅ | `sum(allocation) + ticketsRemaining == totalTickets`; `state == "settled"` · **TC-DASH-01** |
+| **C** 👀 | **(v4)** Turn mode does NOT guarantee a sell-out, and unsold seats at the top of the ladder are the mechanism working. A reseller stops at ₹30,000 and C5 caps each fan at one ticket, so a floor above both has no possible bidder. Say it rather than skip past it: *"nobody was willing to pay ₹55,000 for the last seat, and no bot was allowed to pretend otherwise."* · **TC-DASH-01b** |
 | **C** ✅ | **Wallet sweep, every participant:** `initialBalance - walletBalance == sum(pricePaid)`, always `0` or exactly one floor · **TC-WAL-04** |
 
 ---

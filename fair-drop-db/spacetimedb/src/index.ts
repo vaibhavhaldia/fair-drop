@@ -27,11 +27,30 @@ import { Timestamp } from 'spacetimedb';
 // `draw.ts` already needed the extension for that reason; having only one file carry it was
 // the inconsistency. `allowImportingTsExtensions` in tsconfig.json is what permits this.
 import { sizeInventory, effectiveQuota, InventoryError } from './pure/inventory.ts';
+import { isEmail } from './pure/email.ts';
 import { deriveDrawSeed, rankEntries, type Entry } from './pure/draw.ts';
 
-/** Countdown and per-slot window, both 60s (LLD §1a). */
+/** Countdown, still 60s (LLD §1a) — and unlike the slot window it binds nothing: the admin
+ *  calls `open_event` by hand, so this only feeds the display timer and this log line. */
 const COUNTDOWN_SECONDS = 60;
-const SLOT_WINDOW_SECONDS = 60;
+
+/**
+ * Per-slot window. 60s is LLD §1a's number and remains the DEFAULT, but it is no longer a
+ * constant: it is stored per event (`event.slotWindowSeconds`) and chosen at `create_event`.
+ *
+ * The reason is rehearsal cost, not stage flexibility. Five slots at 60s is five minutes per
+ * turn-mode run, which is the whole rehearsal budget — so a full turn round gets exercised far
+ * less often than the queue round it is supposed to be compared against. At 10s the same run
+ * takes 50 seconds and can be repeated between changes. On stage it stays 60.
+ *
+ * Bounded on both ends. Below `MIN` the window is shorter than a person's reaction time, so the
+ * draw would be measuring who had the page already open — the exact failure turn mode exists to
+ * remove. Above `MAX` a single slot outlives any plausible demo slot and, more practically, an
+ * abandoned event would keep a scheduled row live for hours.
+ */
+const DEFAULT_SLOT_WINDOW_SECONDS = 60;
+const MIN_SLOT_WINDOW_SECONDS = 5;
+const MAX_SLOT_WINDOW_SECONDS = 600;
 
 // ---------------------------------------------------------------------------------------
 // Tables — seven. `countdown_schedule` and `settle_schedule` are cut in the 4h re-plan;
@@ -67,6 +86,13 @@ const event = table(
     /** Queue mode only. */
     ticketPrice: t.option(t.f64()),
 
+    /**
+     * Turn mode only — seconds each slot stays open, chosen at `create_event` and never
+     * mutated. Stored per event rather than read from a module constant so a rehearsal can run
+     * 10s slots and the stage can run 60s ones from the same published module. 0 in queue mode.
+     */
+    slotWindowSeconds: t.u32(),
+
     /** Turn mode only. */
     currentSlotIndex: t.u32(),
     currentSlotEndsAt: t.option(t.timestamp()),
@@ -83,7 +109,8 @@ const slot = table(
     id: t.u64().primaryKey().autoInc(),
     eventId: t.u64(),
     slotIndex: t.u32(),
-    /** The posted price. Under pay-the-floor this is also the clearing price every winner pays. */
+    /** The MINIMUM bid for this slot. Not a price anyone necessarily pays — under v4's blind
+     *  bidding a winner pays their own bid, which is `>= floor`. */
     floor: t.f64(),
     /** Set once at `start_countdown`, NEVER mutated. `sum(baseQuota) == totalTickets` always. */
     baseQuota: t.u32(),
@@ -111,6 +138,9 @@ const participant = table(
     handle: t.string().unique(),
     /** As typed, NOT unique — live audiences collide on names. */
     displayName: t.string(),
+    /** Normalised (trimmed, lowercased) contact address. `''` for bots, which have none.
+     *  NOT unique: one person may join two events, and a household may share an address. */
+    email: t.string(),
     /** `human` | `bot` — first-class, because it drives the dashboard split. */
     origin: t.string(),
     /** The wallet draw as issued. NEVER mutated; the reconciliation anchor (CONTRACT §5). */
@@ -175,8 +205,15 @@ const slotResult = table(
     id: t.u64().primaryKey().autoInc(),
     eventId: t.u64(),
     slotIndex: t.u32(),
-    /** `= slot.floor`. Every winner in the slot paid exactly this. */
-    clearingPrice: t.f64(),
+    /**
+     * The LOWEST winning bid in this slot — what it took to get in. Under blind bidding each
+     * winner pays their own bid, so there is no single price everyone paid; this is a fact
+     * about the slot, not a charge. `0` when the slot drew no entries.
+     *
+     * Replaces v3's `clearingPrice`, which could be one column only because pay-the-floor made
+     * the floor and the price paid the same number.
+     */
+    cutoffPrice: t.f64(),
     entriesReceived: t.u32(),
     allocated: t.u32(),
     quotaRemainingAfterRollover: t.u32(),
@@ -289,19 +326,31 @@ export const createEvent = spacetimedb.procedure(
     ticketFraction: t.f64(),
     ticketPrice: t.f64(),
     floors: t.array(t.f64()),
+    /** Turn mode only; pass 0 in queue mode, or to take the 60s default. */
+    slotWindowSeconds: t.u32(),
   },
   t.u64(),
-  (ctx, { name, mode, ticketFraction, ticketPrice, floors }) => {
+  (ctx, { name, mode, ticketFraction, ticketPrice, floors, slotWindowSeconds }) => {
     if (mode !== 'queue' && mode !== 'turn') throw new SenderError('E_MODE_INVALID');
     if (!(ticketFraction > 0 && ticketFraction <= 1)) throw new SenderError('E_FRACTION_INVALID');
 
     if (mode === 'turn') {
       if (floors.length === 0) throw new SenderError('E_FLOORS_EMPTY');
-      // Reject, do not warn. Under pay-the-floor a non-increasing ladder means a later slot is
+      // Reject, do not warn. A non-increasing ladder means a later slot is
       // cheaper than an earlier one, and every remaining participant would rationally skip
       // ahead to it — which quietly dismantles the mechanism the demo is about.
       for (let i = 1; i < floors.length; i++) {
         if (floors[i] <= floors[i - 1]) throw new SenderError('E_FLOORS_NOT_INCREASING');
+      }
+      // 0 means "unspecified" and takes the default, so an existing caller that has no opinion
+      // about the window keeps the 60s it already had. Any other out-of-range value is a typo
+      // worth rejecting rather than silently clamping — a run at the wrong slot length looks
+      // like a working run and its timings are quietly meaningless.
+      if (
+        slotWindowSeconds !== 0 &&
+        (slotWindowSeconds < MIN_SLOT_WINDOW_SECONDS || slotWindowSeconds > MAX_SLOT_WINDOW_SECONDS)
+      ) {
+        throw new SenderError('E_SLOT_WINDOW_INVALID');
       }
     } else if (!(ticketPrice > 0)) {
       throw new SenderError('E_TICKET_PRICE_INVALID');
@@ -319,6 +368,8 @@ export const createEvent = spacetimedb.procedure(
         ticketsRemaining: 0,
         participantsAtOpen: 0,
         slotCount: mode === 'turn' ? floors.length : 0,
+        slotWindowSeconds:
+          mode === 'turn' ? slotWindowSeconds || DEFAULT_SLOT_WINDOW_SECONDS : 0,
         startTime: ctx.timestamp,
         endTime: undefined,
         ticketPrice: mode === 'queue' ? ticketPrice : undefined,
@@ -356,10 +407,17 @@ export const createEvent = spacetimedb.procedure(
  * straggler mid-demo.
  */
 export const join = spacetimedb.procedure(
-  { eventId: t.u64(), displayName: t.string(), origin: t.string() },
+  { eventId: t.u64(), displayName: t.string(), email: t.string(), origin: t.string() },
   t.u64(),
-  (ctx, { eventId, displayName, origin }) => {
+  (ctx, { eventId, displayName, email, origin }) => {
     if (origin !== 'human' && origin !== 'bot') throw new SenderError('E_ORIGIN_INVALID');
+
+    // Normalised HERE, not on the client: the bot driver, the CLI and the browser all call this
+    // procedure, and a row's address has to mean the same thing whichever one wrote it.
+    const contact = email.trim().toLowerCase();
+    // Bots have no address and must not be forced to invent one; a human without a valid one is
+    // rejected, because the address is the only way to reach a winner after the room empties.
+    if (origin === 'human' && !isEmail(contact)) throw new SenderError('E_EMAIL_INVALID');
 
     return ctx.withTx((tx: any) => {
       const ev = tx.db.event.id.find(eventId);
@@ -393,6 +451,7 @@ export const join = spacetimedb.procedure(
         identity: ctx.sender,
         handle,
         displayName,
+        email: contact,
         origin,
         initialBalance: draw,
         walletBalance: draw,
@@ -469,7 +528,7 @@ export const openEvent = spacetimedb.reducer({ eventId: t.u64() }, (ctx, { event
   if (ev.state !== 'countdown') throw new SenderError('E_WRONG_STATE');
 
   if (ev.mode === 'turn') {
-    const endsAt = secondsFrom(ctx.timestamp, SLOT_WINDOW_SECONDS);
+    const endsAt = secondsFrom(ctx.timestamp, ev.slotWindowSeconds);
     ctx.db.event.id.update({ ...ev, state: 'open', currentSlotEndsAt: endsAt });
     ctx.db.slotSchedule.insert({
       scheduledId: 0n,
@@ -593,9 +652,14 @@ export const submitBid = spacetimedb.reducer(
 
     const slotRow = findSlot(ctx as any, eventId, slotIndex);
     if (slotRow == null) throw new SenderError('E_STALE_SLOT');
-    // An entry is an opt-in at the posted price. There is no bid amount to choose — for anyone.
-    if (price !== slotRow.floor) throw new SenderError('E_PRICE_MISMATCH');
-    if (p.walletBalance < slotRow.floor) throw new SenderError('E_INSUFFICIENT_BALANCE');
+    // Blind bidding: the floor is a MINIMUM, not the price. A bidder commits to any amount at
+    // or above it that their wallet covers, sees nobody else's number, and the slot resolves in
+    // decreasing order at close. Bidding the floor exactly is still allowed and still normal —
+    // it is the cheapest way in when a slot is undersubscribed.
+    if (!(price >= slotRow.floor)) throw new SenderError('E_PRICE_MISMATCH');
+    // The wallet is checked against the BID, not the floor: committing more than you hold is
+    // the one way a blind bid could win a ticket it cannot pay for.
+    if (p.walletBalance < price) throw new SenderError('E_INSUFFICIENT_BALANCE');
 
     // C2 — check-then-insert, safe ONLY because reducers run serially. There is no composite
     // unique constraint to lean on; SpacetimeDB supports single-column unique only.
@@ -608,7 +672,7 @@ export const submitBid = spacetimedb.reducer(
       eventId,
       slotIndex,
       participantId,
-      price: slotRow.floor,
+      price,
       qty: 1,
       seq: nextSeq(ctx as any, eventId),
       state: 'pending',
@@ -695,7 +759,7 @@ export const closeSlot = spacetimedb.reducer(
     const entries: Entry[] = [];
     const bidRows: any[] = [];
     for (const b of ctx.db.bid.by_event_slot.filter([timer.eventId, timer.slotIndex])) {
-      entries.push({ id: b.id, participantId: b.participantId });
+      entries.push({ id: b.id, participantId: b.participantId, price: b.price });
       bidRows.push(b);
     }
 
@@ -709,6 +773,10 @@ export const closeSlot = spacetimedb.reducer(
 
     const bidById = new Map<bigint, any>(bidRows.map(b => [b.id, b]));
     let filled = 0;
+    // 0, not null: `slot_result.cutoffPrice` is `f64` rather than `option<f64>` because a slot
+    // that took no entries has no cutoff to report and 0 says so unambiguously — `allocated`
+    // is 0 alongside it, and every reader already has to handle the empty slot.
+    let cutoffPrice = 0;
     let ticketsRemaining = ev.ticketsRemaining;
 
     for (const entry of ranked) {
@@ -726,26 +794,28 @@ export const closeSlot = spacetimedb.reducer(
       // a winner (C5), and under C5 a balance cannot move between submit and close within one
       // event. The policy is stated rather than exercised — pass the ticket to the next in draw
       // order, never produce a negative balance. TC-CLR-12/13 assert these never fire.
-      if (p.hasWon || p.walletBalance < slotRow.floor) {
+      if (p.hasWon || p.walletBalance < entry.price) {
         ctx.db.bid.id.update({ ...bidRow, state: 'rejected' });
         continue;
       }
 
-      // Allocation and debit in the same transaction, at the slot's uniform price. Every winner
-      // in the slot pays exactly this — there is no per-winner price under pay-the-floor.
+      // Allocation and debit in the same transaction, at THIS winner's own bid. Two winners in
+      // one slot routinely pay different amounts — that is what pay-your-bid means, and it is
+      // why `pricePaid` is per-allocation rather than derivable from the slot.
       ctx.db.allocation.insert({
         id: 0n,
         eventId: timer.eventId,
         slotIndex: timer.slotIndex,
         participantId: entry.participantId,
-        pricePaid: slotRow.floor,
+        pricePaid: entry.price,
       });
       ctx.db.participant.id.update({
         ...p,
-        walletBalance: p.walletBalance - slotRow.floor,
+        walletBalance: p.walletBalance - entry.price,
         hasWon: true,
       });
       ctx.db.bid.id.update({ ...bidRow, state: 'won' });
+      cutoffPrice = entry.price; // ranked descending, so the last one taken IS the cutoff
       filled++;
       ticketsRemaining--;
     }
@@ -759,7 +829,7 @@ export const closeSlot = spacetimedb.reducer(
       id: 0n,
       eventId: timer.eventId,
       slotIndex: timer.slotIndex,
-      clearingPrice: slotRow.floor,
+      cutoffPrice,
       entriesReceived: slotRow.entriesReceived,
       allocated: filled,
       quotaRemainingAfterRollover: unfilled,
@@ -787,7 +857,9 @@ export const closeSlot = spacetimedb.reducer(
       });
     }
 
-    const endsAt = secondsFrom(ctx.timestamp, SLOT_WINDOW_SECONDS);
+    // Every slot in an event uses the same window — read from the event row, so a slot cannot
+    // silently run to a different length than the one the round was rehearsed at.
+    const endsAt = secondsFrom(ctx.timestamp, ev.slotWindowSeconds);
     ctx.db.event.id.update({
       ...ev,
       ticketsRemaining,
