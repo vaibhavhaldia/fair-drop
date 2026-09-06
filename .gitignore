@@ -4,3 +4,5 @@ fair-drop-db/spacetimedb/dist/
 clients/web/dist/
 
 .vercel
+.env
+.env.local
