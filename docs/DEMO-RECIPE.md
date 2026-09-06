@@ -253,6 +253,18 @@ only your word for it.
 
 ---
 
+## Known gap — the driver's silent zero
+
+`READY joined=0` is reported as success. A join that fails for any reason other than
+`E_HANDLE_COLLISION` (wrong event id, an event on a different database, a module republished
+out from under the driver) leaves the bot count at zero, and the driver prints its READY line
+and exits `turn run complete` with nothing having happened. Reproduced 2026-09-06 against a
+local database whose events had been cleared.
+
+It is filed rather than fixed because the fix belongs with the join path's error handling, not
+with a demo-day patch. Until then the recovery above is the check: the READY line's number is
+the thing to read, not the fact that it appeared.
+
 ## Failure playbook
 
 Rehearse these too. Knowing the recovery is the difference between a pause and a dead demo.
@@ -260,6 +272,7 @@ Rehearse these too. Knowing the recovery is the difference between a pause and a
 | Symptom | Most likely cause | Recovery |
 |---|---|---|
 | Bots don't appear | `join` throwing; check `spacetime logs` | `E_HANDLE_COLLISION` should retry, not abort |
+| Bots don't appear, and the driver printed `READY joined=0` then exited cleanly | **Wrong event id, or the event does not exist on that database.** The driver does not treat a failed join as fatal, so it reports READY with a count of zero and finishes without an error | Re-read the id from the admin page and check the db name is the last argument. *Known gap — the driver should refuse to report READY with zero bots; see the note below* |
 | `totalTickets == 0` | `start_countdown` before bots joined | `E_NO_PARTICIPANTS` should have blocked it — **TC-EVT-12** |
 | Slots don't advance | `slot_schedule` row not inserted by `open_event` | Verify `SELECT * FROM slot_schedule`; the surviving schedule is the one thing that must work |
 | Queue event won't settle | Never sold out and no admin call | Call `settle` — that is why it is admin-callable |
