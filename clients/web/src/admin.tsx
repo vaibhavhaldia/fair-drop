@@ -218,8 +218,15 @@ function BotPanel({
   const [copied, setCopied] = useState(false);
   const target = computeBotCount(humans);
   const script = mode === "turn" ? "turn.ts" : "index.ts";
+  // FAIRDROP_URI is part of the command, always — not only when it looks non-local.
+  //
+  // The driver defaults to http://127.0.0.1:3000. Copy this command off a DEPLOYED admin page
+  // without it and the bots dial localhost while the event lives on Maincloud: every join
+  // fails, and because a failed join is not fatal the driver prints `READY joined=0` and exits
+  // cleanly. The operator sees a command they copied from the page itself, a driver that
+  // claims success, and no bots — with nothing in any log to say why.
   const command =
-    `node --experimental-strip-types clients/bots/src/${script} ` +
+    `FAIRDROP_URI=${moduleUri()} node --experimental-strip-types clients/bots/src/${script} ` +
     `${humans} ${eventId} ${dbName()}`;
 
   const copy = () => {
