@@ -1,5 +1,26 @@
 # fair-drop
 
+## Quick start
+
+```bash
+spacetime start          # in its own terminal, and leave it running
+./scripts/setup.sh       # installs everything, publishes the module, prints the next steps
+```
+
+`setup.sh` is idempotent and tells you what to run next. It exists because the dependency
+graph is not guessable: the bot driver has no dependencies of its own, but will not start
+until `clients/sdk` is installed — it reaches through the SDK into `generated/`, which imports
+`spacetimedb`. Without that, the first thing you see is `ERR_MODULE_NOT_FOUND ... imported
+from clients/sdk/generated/index.ts`, naming a directory you never touched.
+
+Nothing needs a `.env`. The pages derive the module from the host they were loaded from, so a
+local `spacetime start` and a phone on the same wifi both work with no configuration; see
+`clients/web/.env.example` for when you want to point a dev server somewhere else, and
+`docs/DEPLOYMENT.md` for how the deployed build is configured.
+
+Requires node 22+ and the [SpacetimeDB CLI](https://install.spacetimedb.com).
+
+
 Ticket bots are playing the existing rules correctly because the sale rewards speed; change the clearing rule so arrival time carries no information.
 
 In high-demand sales, inventory is allocated in order of server-arrival timestamp, but that timestamp is affected by automation rate, network RTT, geographic proximity, retries and connection concurrency.
